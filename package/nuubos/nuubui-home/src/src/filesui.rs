@@ -21,8 +21,8 @@
  */
 
 use crate::gameui::{
-    apply_rows, apply_rows_sections, arm_or, armed, armed_detail, focused_key, move_selection, notice, row, run_tool,
-    show, tool_then,
+    apply_rows, apply_rows_sections, arm_or, armed, armed_detail, emulation, focused_key, move_selection, notice, row,
+    run_tool, show, tool_then,
 };
 use crate::{handle_settings_action, navigate_settings_view, open_settings_choice, open_system_keyboard,
     play_ui_sound, tr, tr_arg, write_ui_context, AppHint, FilePane, FileRow, GenRow, HomeWindow};
@@ -816,6 +816,14 @@ fn actions(ui: &HomeWindow) {
         if pane.marks.is_empty() && focused.is_some() {
             opts.push(("rename".into(), tr(ui, 617, "Rename")));
         }
+        /* Play (user request 2026-10-28, personal fork feature): a raw
+         * launch, no library entry, no history, no per-game overrides -
+         * try a ROM before deciding whether to add it to the library.
+         * Shown for any file; nuubos-emud itself rejects an extension no
+         * system claims. */
+        if pane.marks.is_empty() && focused.as_ref().is_some_and(|e| !e.dir) {
+            opts.push(("play".into(), tr(ui, 1418, "Play")));
+        }
         if n > 0 {
             opts.push(("add-library".into(), tr(ui, 1275, "Add to Library")));
             opts.push(("delete".into(), tr(ui, 618, "Delete")));
@@ -1393,6 +1401,22 @@ pub fn apply_choice(ui: &HomeWindow, context: &str, value: String) {
                 "sort" => cycle_sort(ui),
                 "add-share" => start_add_share(ui),
                 "add-library" => start_import(ui),
+                "play" => {
+                    let path = STATE.with(|st| targets(&st.borrow()).into_iter().next()).unwrap_or_default();
+                    if path.is_empty() {
+                        return;
+                    }
+                    let weak = ui.as_weak();
+                    thread::spawn(move || {
+                        let reply = emulation(&format!("LAUNCH_FILE\t{path}"), false);
+                        if reply.trim() != "OK" {
+                            let _ = slint::invoke_from_event_loop(move || {
+                                let Some(ui) = weak.upgrade() else { return };
+                                files_notice(&ui, tr(&ui, 1419, "Could not play this file"));
+                            });
+                        }
+                    });
+                }
                 _ => {}
             }
         }
