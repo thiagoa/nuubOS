@@ -135,6 +135,11 @@ struct game {
 	int year;
 	int players;
 	char *genre;
+	/* Under a "noscrape" folder (user request 2026-10-28): still listed
+	 * and playable, but excluded from bulk scraping so it costs no
+	 * network calls or Skyscraper work. Not persisted (recomputed from
+	 * the folder every scan, like year/players/genre). */
+	bool no_scrape;
 };
 
 /*
@@ -206,6 +211,7 @@ struct scan_item {
 	int year;
 	int players;
 	char *genre;
+	bool no_scrape;
 };
 
 struct scan_result {
@@ -1353,7 +1359,7 @@ static int classify(const char *rel, const char *name, int folder_sys)
 	return -1;
 }
 
-static void walk(struct scan_ctx *ctx, const char *sub, int depth, int folder_sys)
+static void walk(struct scan_ctx *ctx, const char *sub, int depth, int folder_sys, bool no_scrape)
 {
 	char path[PATH_MAX];
 	DIR *dir;
@@ -1364,6 +1370,16 @@ static void walk(struct scan_ctx *ctx, const char *sub, int depth, int folder_sy
 	dir = opendir(path);
 	if (!dir)
 		return;
+	/* A ".noscrape" file here (any folder, any depth, any name): every
+	 * game found at or below this point stays listed and playable, but
+	 * bulk scraping skips it (user request 2026-10-28). Inherited by
+	 * subfolders, so one marker covers a whole collection. */
+	if (!no_scrape) {
+		char marker[PATH_MAX];
+
+		no_scrape = pathf(marker, sizeof(marker), "%s/.noscrape", path) &&
+			    regular_file(marker);
+	}
 	while ((de = readdir(dir)) != NULL) {
 		char rel[PATH_MAX];
 		char full[PATH_MAX];
@@ -1384,7 +1400,7 @@ static void walk(struct scan_ctx *ctx, const char *sub, int depth, int folder_sy
 			if (depth >= MAX_SCAN_DEPTH || skip_directory(de->d_name) || is_ports(folder_sys))
 				continue;
 			here = system_by_folder(de->d_name);
-			walk(ctx, rel, depth + 1, here >= 0 ? here : folder_sys);
+			walk(ctx, rel, depth + 1, here >= 0 ? here : folder_sys, no_scrape);
 			continue;
 		}
 		if (!S_ISREG(st.st_mode))
@@ -1418,6 +1434,7 @@ static void walk(struct scan_ctx *ctx, const char *sub, int depth, int folder_sy
 			.year = 0,
 			.players = 0,
 			.genre = NULL,
+			.no_scrape = no_scrape,
 		};
 	}
 	closedir(dir);
@@ -1488,9 +1505,9 @@ static void *scan_main(void *arg)
 	size_t port_count = 0;
 	struct port_info *ports = NULL;
 
-	walk(&ctx, "", 0, -1);
+	walk(&ctx, "", 0, -1, false);
 	if (sd2_roms[0])
-		walk(&ctx, SD2_PREFIX, 0, -1);
+		walk(&ctx, SD2_PREFIX, 0, -1, false);
 	for (size_t i = 0; i < ctx.out->count && !ports; i++)
 		if (is_ports(ctx.out->items[i].sys))
 			ports = load_port_infos(&port_count);
@@ -1702,6 +1719,7 @@ static bool reconcile(struct scan_result *scan)
 			g->year = it->year;
 			g->players = it->players;
 			g->genre = it->genre;
+			g->no_scrape = it->no_scrape;
 			it->rel = NULL;
 			it->cover = NULL;
 			it->genre = NULL;
@@ -1721,6 +1739,7 @@ static bool reconcile(struct scan_result *scan)
 		free(g->genre);
 		g->genre = it->genre;
 		it->genre = NULL;
+		g->no_scrape = it->no_scrape;
 		if (strcmp(g->rel, it->rel)) {
 			/* Moved to another folder: same game, new location. */
 			free(g->rel);
@@ -2418,11 +2437,12 @@ static void append_game(struct strbuf *b, const char *key, const struct game *g)
 	sb_append(b, "%s=%s\t%s\t%s\t", key, g->id, s->id, g->title);
 	sb_append(b, "%s", g->cover ? g->cover : "");
 	/* Field 9 (the former favorite flag): where the game is, 0 = SD1, 2 = SD2.
-	 * Field 13: the user's tags of the game ("completed,broken"). */
-	sb_append(b, "\t%d\t%lld\t%lld\t%d\t%d\t%d\t%d\t%s\t%s\n", s->aspect,
+	 * Field 13: the user's tags of the game ("completed,broken").
+	 * Field 14: no_scrape (a "noscrape" folder, user request 2026-10-28). */
+	sb_append(b, "\t%d\t%lld\t%lld\t%d\t%d\t%d\t%d\t%s\t%s\t%d\n", s->aspect,
 		  h ? hist_last(h) : 0LL, h ? hist_time(h) : 0LL,
 		  g->available ? 1 : 0, rel_on_sd2(g->rel) ? 2 : 0, g->year, g->players,
-		  g->genre ? g->genre : "", tags);
+		  g->genre ? g->genre : "", tags, g->no_scrape ? 1 : 0);
 }
 
 static int history_compare(const void *a, const void *b)
