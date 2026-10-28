@@ -2799,6 +2799,9 @@ struct GameSnapshot {
     menu: bool,
     /* RetroAchievements hardcore: no save states (EPIC-017). */
     hardcore: bool,
+    /* Achievements enabled for the session's user, independent of
+     * hardcore: gates the Hardcore Mode row (user request 2026-10-27). */
+    cheevos_enabled: bool,
     /* Cheats turned on; netplay (off|starting|host|client), players
      * connected, the other side's name. */
     cheats_on: i32,
@@ -2831,6 +2834,7 @@ fn parse_game_snapshot(reply: &str) -> GameSnapshot {
             Some(("retroarch_menu", value)) => snapshot.retroarch_menu = value == "1",
             Some(("menu", value)) => snapshot.menu = value == "1",
             Some(("hardcore", value)) => snapshot.hardcore = value == "1",
+            Some(("cheevos_enabled", value)) => snapshot.cheevos_enabled = value == "1",
             Some(("cheats_on", value)) => snapshot.cheats_on = value.parse().unwrap_or(0),
             Some(("netplay", value)) => snapshot.netplay = value.to_owned(),
             Some(("netplay_peers", value)) => snapshot.net_peers = value.parse().unwrap_or(0),
@@ -2861,6 +2865,16 @@ const LAYOUT_ROW: i32 = 43;
  * the disc dropdown; a choice goes back to the game, emud changes the
  * disc with the tray open for a moment (RC4 feature, EPIC-005/019). */
 const DISC_ROW: i32 = 51;
+/* GAME → Hardcore Mode (19, the lowest unused index; 46 is TERMINAL's
+ * Resume row, added upstream after this feature first claimed it),
+ * right before Restart Game: a session-only override of RetroArch's
+ * own Hardcore Mode, visible whenever achievements are enabled for the
+ * user (user request 2026-10-27, personal fork feature, see
+ * docs/dev/emulation.md). Never written to the user's stored
+ * RetroAchievements settings. Takes a second press either way
+ * (nuubos-emud CHEEVOS_HARDCORE <0|1>; the reset either direction
+ * causes is why, same EPIC-005 rule as Restart Game/Load State/Quit). */
+const HARDCORE_ROW: i32 = 19;
 
 fn toggle_stylus(ui: &QuickMenuWindow) {
     let control = input_command("STATUS")
@@ -3141,6 +3155,10 @@ fn apply_game_snapshot(ui: &QuickMenuWindow, snapshot: &GameSnapshot) {
     if ui.get_game_hardcore() && (9..=11).contains(&ui.get_selected_index()) {
         ui.set_selected_index(8);
         ui.set_game_slot_dropdown_open(false);
+    }
+    ui.set_game_cheevos_enabled(snapshot.running && snapshot.cheevos_enabled);
+    if !ui.get_game_cheevos_enabled() && ui.get_selected_index() == HARDCORE_ROW {
+        ui.set_selected_index(8);
     }
     ui.set_game_overlay_on(snapshot.overlay);
     ui.set_game_retroarch(snapshot.retroarch_menu);
@@ -4862,6 +4880,9 @@ fn selectable_menu_indices(ui: &QuickMenuWindow) -> Vec<i32> {
         if ui.get_game_discs() > 1 {
             indices.push(DISC_ROW);
         }
+        if ui.get_game_cheevos_enabled() {
+            indices.push(HARDCORE_ROW);
+        }
         indices.extend_from_slice(&[12, CHEATS_ROW, NET_ROW]);
         if ui.get_game_retroarch() {
             indices.push(13);
@@ -5866,12 +5887,13 @@ fn activate_stream_row(
     Ok(())
 }
 
-/* GAME rows (8 Resume .. 11 State Slot, NDS 42 Stylus and 43 Screen
- * Layout, 12 Restart, 40 Cheats, 41 Netplay, 13 RetroArch Advanced, 18
- * Screenshot, 28 Performance Overlay, 14 Quit).
+/* GAME rows (8 Resume .. 11 State Slot, 19 Hardcore Mode, NDS 42 Stylus
+ * and 43 Screen Layout, 12 Restart, 40 Cheats, 41 Netplay, 13 RetroArch
+ * Advanced, 18 Screenshot, 28 Performance Overlay, 14 Quit).
  * The screenshot is RetroArch's own rendering, so the menu is not in it.
- * Load State, Restart Game and Quit Game
- * lose unsaved progress and take a second press (EPIC-005 safety rules). */
+ * Load State, Restart Game, Quit Game and Hardcore Mode (either
+ * direction resets the content) lose unsaved progress and take a
+ * second press (EPIC-005 safety rules). */
 fn activate_game_row(
     ui: &QuickMenuWindow,
     mapped: &mut bool,
@@ -5882,7 +5904,7 @@ fn activate_game_row(
     conn: &Connection,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let index = ui.get_selected_index();
-    if matches!(index, 10 | 12 | 14) && ui.get_game_confirm_index() != index {
+    if matches!(index, 10 | 12 | 14 | HARDCORE_ROW) && ui.get_game_confirm_index() != index {
         ui.set_game_confirm_index(index);
         return redraw_overlay(ui, queue, state, qh, conn);
     }
@@ -5904,6 +5926,12 @@ fn activate_game_row(
             return redraw_overlay(ui, queue, state, qh, conn);
         }
         12 => game_action("RESET"),
+        HARDCORE_ROW => {
+            let value = if ui.get_game_hardcore() { "0" } else { "1" };
+            if let Err(error) = emulation_command(&format!("CHEEVOS_HARDCORE\t{value}")) {
+                eprintln!("quick-menu: game hardcore {value} failed={error}");
+            }
+        }
         CHEATS_ROW | NET_ROW => {
             open_game_sheet(ui, index);
             return redraw_overlay(ui, queue, state, qh, conn);
