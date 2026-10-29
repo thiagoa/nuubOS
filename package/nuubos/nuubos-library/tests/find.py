@@ -16,6 +16,9 @@ open(run + '/user/active', 'w').write(user + '\n')
 for name, size in (('Super Mario World', 100), ('Zelda', 200), ('Mario Kart', 300)):
     open(ud + '/roms/snes/%s.sfc' % name, 'w').write('x' * size)
 open(ud + '/roms/gba/Metroid Fusion.gba', 'w').write('m' * 50)
+os.makedirs(ud + '/roms/snes/Homebrew', exist_ok=True)
+open(ud + '/roms/snes/Homebrew/.noscrape', 'w').close()
+open(ud + '/roms/snes/Homebrew/Homebrew Demo.sfc', 'w').write('h' * 10)
 open(ud + '/library/covers/snes/Zelda.png', 'w').write('png')
 open(ud + '/library/covers/snes/Mario Kart.png', 'w').write('png')
 meta = ud + '/library/metadata/snes/'
@@ -75,13 +78,18 @@ for _ in range(50):
 check('title words', titles(cmd('SEARCH\tq=mario')) == ['Mario Kart', 'Super Mario World'])
 check('two words', titles(cmd('SEARCH\tq=super mario')) == ['Super Mario World'])
 check('system', titles(cmd('SEARCH\tsystem=gba')) == ['Metroid Fusion'])
+check('noscrape folder still listed', 'Homebrew Demo' in titles(cmd('GAMES\tsystem:snes')))
+homebrew = [l for l in cmd('GAMES\tsystem:snes').splitlines() if l.startswith('game=') and '\tHomebrew Demo\t' in l][0]
+check('noscrape flag set', homebrew.split('\t')[13] == '1')
+other = [l for l in cmd('GAMES\tsystem:snes').splitlines() if l.startswith('game=') and '\tZelda\t' in l][0]
+check('noscrape flag unset elsewhere', other.split('\t')[13] == '0')
 check('year range', titles(cmd('SEARCH\tyear=1991-1999')) == ['Mario Kart', 'Zelda'])
 check('genre', titles(cmd('SEARCH\tgenre=action')) == ['Super Mario World', 'Zelda'])
 check('players', titles(cmd('SEARCH\tplayers=3')) == ['Mario Kart'])
 check('combined', titles(cmd('SEARCH\tq=mario|players=2|year=1990-1990')) == ['Super Mario World'])
 check('random one', len(titles(cmd('SEARCH\trandom=1'))) == 1)
 cmd('SESSION_RECORD\t' + cmd('SEARCH\tq=zelda').split('\t')[0].split('=')[1] + '\t60')
-check('unplayed', 'Zelda' not in titles(cmd('SEARCH\tunplayed=1')) and len(titles(cmd('SEARCH\tunplayed=1'))) == 3)
+check('unplayed', 'Zelda' not in titles(cmd('SEARCH\tunplayed=1')) and len(titles(cmd('SEARCH\tunplayed=1'))) == 4)
 check('random unplayed', titles(cmd('SEARCH\tunplayed=1|random=1|q=zelda')) == [])
 zid = cmd('SEARCH\tq=zelda').split('\t')[0].split('=')[1]
 d = cmd('DETAILS\t' + zid)
@@ -98,7 +106,7 @@ check('no favorites collection', 'collection=favorites' not in st)
 # Tags: per user, one status at a time, searchable, in the game line.
 check('tag unknown', cmd('TAG_SET\t' + zid + '\tshiny').startswith('ERR'))
 check('tag set', cmd('TAG_SET\t' + zid + '\tplaying') == 'OK\n')
-check('tag in line', [l for l in cmd('SEARCH\tq=zelda').splitlines() if l.startswith('game=')][0].endswith('\tplaying'))
+check('tag in line', [l for l in cmd('SEARCH\tq=zelda').splitlines() if l.startswith('game=')][0].split('\t')[12] == 'playing')
 cmd('TAG_SET\t' + zid + '\tbroken')
 cmd('TAG_SET\t' + zid + '\tcompleted')
 zline = [l for l in cmd('SEARCH\tq=zelda').splitlines() if l.startswith('game=')][0]

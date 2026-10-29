@@ -2239,18 +2239,25 @@ static int cmd_bulk(const char *scope)
 			continue;
 		for (l2 = strtok_r(list, "\n", &save2); l2 && count < MAX_BATCH;
 		     l2 = strtok_r(NULL, "\n", &save2)) {
-			char *f = l2;
+			char *available = l2, *no_scrape = l2;
 			int field = 0;
 
 			if (strncmp(l2, "game=", 5) || strlen(l2) < 21)
 				continue;
-			/* Unavailable games cannot be identified: skip them. */
+			/* Field 7 = available (unavailable games cannot be
+			 * identified); field 13 = no_scrape (a "noscrape"
+			 * folder, user request 2026-10-28): never bulk
+			 * scraped, no network/Skyscraper weight. */
 			for (char *p = l2; *p; p++)
-				if (*p == '\t' && ++field == 7) {
-					f = p + 1;
-					break;
+				if (*p == '\t') {
+					if (++field == 7)
+						available = p + 1;
+					else if (field == 13)
+						no_scrape = p + 1;
 				}
-			if (field == 7 && f[0] == '0')
+			if (field >= 7 && available[0] == '0')
+				continue;
+			if (field >= 13 && no_scrape[0] == '1')
 				continue;
 			snprintf(ids[count], 17, "%.16s", l2 + 5);
 			copy_text(systems_of[count], sizeof(systems_of[count]), system);
