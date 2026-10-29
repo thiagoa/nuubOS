@@ -354,6 +354,11 @@ struct session {
 	bool fast_forward;
 	/* RetroAchievements hardcore: no save states, no fast-forward. */
 	bool hardcore;
+	/* Whether achievements are enabled at all for the session's user,
+	 * independent of hardcore: gates the Quick Menu's Hardcore Mode row
+	 * (user request 2026-10-27). hardcore itself can change mid-session
+	 * through that row; this cannot (it is fixed at launch). */
+	bool achievements_enabled;
 	long long started_ms;
 	long long quit_deadline_ms;
 	bool term_sent;
@@ -1054,6 +1059,7 @@ static size_t build_status(char *out, size_t size)
 			 "menu=%d\n"
 			 "fps=%.1f\n"
 			 "hardcore=%d\n"
+			 "cheevos_enabled=%d\n"
 			 "cheats_on=%d\n"
 			 "netplay=%s\n"
 			 "netplay_peers=%d\n"
@@ -1079,6 +1085,7 @@ static size_t build_status(char *out, size_t size)
 			 session.menu ? 1 : 0,
 			 session.fps,
 			 session.state != SESSION_IDLE && session.hardcore ? 1 : 0,
+			 session.state != SESSION_IDLE && session.achievements_enabled ? 1 : 0,
 			 session.cheats_on,
 			 session.state == SESSION_IDLE ? "off"
 			 : session.netplay == NET_HOST ? "host"
@@ -2893,7 +2900,7 @@ static void handle_ra_reply(char *line)
 		return;
 	}
 	if (!strcmp(line, "CHEATS_LOAD FAILED") || !strcmp(line, "NETPLAY_STOP FAILED") ||
-	    !strcmp(line, "SET_CORE_OPTION FAILED")) {
+	    !strcmp(line, "SET_CORE_OPTION FAILED") || !strcmp(line, "CHEEVOS_HARDCORE_SET FAILED")) {
 		log_msg("emud: retroarch refused %s", line);
 		return;
 	}
@@ -3832,6 +3839,7 @@ static const char *launch(const char *game, const char *mode, const char *net)
 	load_overrides(session.user, game, &overrides);
 	load_achievements(session.user, &achievements);
 	session.hardcore = achievements.enabled && achievements.hardcore;
+	session.achievements_enabled = achievements.enabled;
 	if (session.hardcore && !strncmp(mode, "slot:", 5))
 		return "hardcore";
 	/* Joining: the host's emulator, whatever the game's choice. */
@@ -5449,6 +5457,30 @@ static void handle_command(struct client *c, char *line)
 			return;
 		ra_command("RESET");
 		ra_command("SET_PAUSED 0");
+		reply(c, "OK\n");
+	} else if (!strcmp(line, "CHEEVOS_HARDCORE") && arg &&
+		   (!strcmp(arg, "0") || !strcmp(arg, "1"))) {
+		/* Quick Menu Hardcore Mode row (user request 2026-10-27):
+		 * session-only, never written to the user's stored
+		 * RetroAchievements settings. RetroArch patch 0013 resets
+		 * the content either way, so cheats (disallowed in hardcore)
+		 * are cleared first the same way launch/CHEATS_LOAD do. */
+		bool on = !strcmp(arg, "1");
+
+		if (!running(c))
+			return;
+		if (!session.achievements_enabled) {
+			reply(c, "ERR unavailable\n");
+			return;
+		}
+		if (on && session.cheats_on) {
+			ra_command("CHEATS_LOAD");
+			session.cheats_on = 0;
+		}
+		ra_command("CHEEVOS_HARDCORE_SET %d", on ? 1 : 0);
+		ra_command("SET_PAUSED 0");
+		session.hardcore = on;
+		notify_subscribers();
 		reply(c, "OK\n");
 	} else if (!strcmp(line, "FAST_FORWARD")) {
 		if (!running(c))

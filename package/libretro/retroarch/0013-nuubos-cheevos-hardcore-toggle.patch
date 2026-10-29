@@ -1,0 +1,76 @@
+From: nuubOS <noreply@nuubos.invalid>
+Subject: [PATCH] nuubOS CHEEVOS_HARDCORE_SET command
+
+nuubOS lets a user flip RetroAchievements Hardcore Mode mid-session
+from its own in-game Quick Menu (nuubos-emud drives RetroArch on the
+stdin command interface, as with CHEATS_LOAD/NETPLAY_STOP).
+
+- CHEEVOS_HARDCORE_SET <0|1>: sets cheevos_hardcore_mode_enable and
+  applies it live the same way RetroArch's own menu checkbox does
+  (rcheevos_hardcore_enabled_changed, not the one-directional "pause"
+  path used by the CHEEVOS_HARDCORE_MODE_TOGGLE command/hotkey, which
+  only turns hardcore off and only when the setting is already on),
+  then resets the content: neither the menu checkbox nor the existing
+  toggle command do that on their own, and nuubOS wants a clean game
+  state on either side of the switch. Replies
+  "CHEEVOS_HARDCORE_SET OK|FAILED".
+
+Upstream-Status: Inappropriate [nuubOS session manager integration]
+---
+--- a/command.c
++++ b/command.c
+@@ -911,6 +911,36 @@
+    return ret;
+ }
+ 
++/* nuubOS: sets RetroArch's own Hardcore Mode setting live (same write
++ * path as its menu checkbox) and resets the content either way, since
++ * neither the checkbox nor CMD_EVENT_CHEEVOS_HARDCORE_MODE_TOGGLE do
++ * that on their own. Replies "CHEEVOS_HARDCORE_SET OK|FAILED". */
++bool command_cheevos_hardcore_set(command_t *cmd, const char *arg)
++{
++   char reply[64];
++   size_t _len;
++   bool ret = false;
++
++#ifdef HAVE_CHEEVOS
++   {
++      settings_t *settings = config_get_ptr();
++      bool want            = !string_is_empty(arg) && arg[0] == '1';
++
++      if (settings->bools.cheevos_hardcore_mode_enable != want)
++      {
++         settings->bools.cheevos_hardcore_mode_enable = want;
++         rcheevos_hardcore_enabled_changed();
++      }
++      command_event(CMD_EVENT_RESET, NULL);
++      ret = true;
++   }
++#endif
++   _len = snprintf(reply, sizeof(reply), "CHEEVOS_HARDCORE_SET %s\n",
++         ret ? "OK" : "FAILED");
++   cmd->replier(cmd, reply, _len);
++   return ret;
++}
++
+ /* nuubOS: SET_CORE_OPTION <key> <value>: sets a core option of the
+  * running core as its menu would (the core sees the change at its next
+  * variable update; RetroArch saves it with the other options). Used for
+--- a/command.h
++++ b/command.h
+@@ -436,6 +436,7 @@
+ bool command_get_fps(command_t *cmd, const char* arg);
+ bool command_osd_text(command_t *cmd, const char* arg);
+ bool command_cheats_load(command_t *cmd, const char* arg);
++bool command_cheevos_hardcore_set(command_t *cmd, const char* arg);
+ bool command_netplay_stop(command_t *cmd, const char* arg);
+ bool command_set_core_option(command_t *cmd, const char* arg);
+ bool command_play_replay_slot(command_t *cmd, const char* arg);
+@@ -475,6 +476,7 @@
+    { "OSD_TEXT",       command_osd_text,        "<text>"},
+    { "CHEATS_LOAD",    command_cheats_load,     "<cheat file>"},
+    { "NETPLAY_STOP",   command_netplay_stop,    "No argument"},
++   { "CHEEVOS_HARDCORE_SET", command_cheevos_hardcore_set, "<0|1>"},
+    { "SET_CORE_OPTION", command_set_core_option, "<key> <value>"},
+    { "PLAY_REPLAY_SLOT",command_play_replay_slot, "<slot number>"},
+    { "SEEK_REPLAY",command_seek_replay, "<frame number>"},
