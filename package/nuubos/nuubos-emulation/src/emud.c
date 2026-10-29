@@ -359,6 +359,11 @@ struct session {
 	 * (user request 2026-10-27). hardcore itself can change mid-session
 	 * through that row; this cannot (it is fixed at launch). */
 	bool achievements_enabled;
+	/* Files app "Play" (user request 2026-10-28): a raw file, no catalog
+	 * entry. game stays empty; no history, no per-game overrides, no
+	 * cheats (a disposable way to try a ROM before adding it to the
+	 * library). */
+	bool raw_file;
 	long long started_ms;
 	long long quit_deadline_ms;
 	bool term_sent;
@@ -3656,12 +3661,67 @@ static void reset_session(void)
 }
 
 /*
+ * systems.conf: the one system whose extensions (field 4) a bare file name
+ * ends with, mirroring libraryd's own system_by_extension()/has_suffix()
+ * (several dots allowed, e.g. "p8.png"); false when none or more than one
+ * system claims it (zip/7z, shared by many, same as a folder-less file in
+ * the real scan). For a raw Files-app launch (user request 2026-10-28):
+ * emud has no other access to the registry, only libraryd does, and this
+ * is simpler than a new library protocol command for one caller.
+ */
+static bool system_for_extension(const char *filename, char *sysid, size_t size)
+{
+	char line[512];
+	char found[64] = "";
+	FILE *fp = fopen(SYSTEMS_CONF, "r");
+
+	if (!fp)
+		return false;
+	while (fgets(line, sizeof(line), fp)) {
+		char *field[7] = { line };
+		int n = 1;
+
+		if (line[0] == '#' || line[0] == '\n')
+			continue;
+		for (char *p = line; *p && n < 7; p++)
+			if (*p == '|') {
+				*p = '\0';
+				field[n++] = p + 1;
+			}
+		if (n < 4)
+			continue;
+		field[3][strcspn(field[3], "\r\n")] = '\0';
+		for (char *ext = strtok(field[3], ","); ext; ext = strtok(NULL, ",")) {
+			size_t elen = strlen(ext);
+			size_t flen = strlen(filename);
+
+			if (!elen || flen <= elen + 1 || filename[flen - elen - 1] != '.' ||
+			    strncasecmp(filename + flen - elen, ext, elen))
+				continue;
+			if (found[0]) {
+				fclose(fp);
+				return false;
+			}
+			copy_text(found, sizeof(found), field[0]);
+		}
+	}
+	fclose(fp);
+	if (!found[0])
+		return false;
+	copy_text(sysid, size, found);
+	return true;
+}
+
+/*
  * mode: "resume" (default) starts from the most recent state (a slot or the
  * automatic state written when the game last closed), "new" from the
  * beginning, "slot:N" from slot N ("slot:-1" = the automatic state).
  * net: "" alone, "host" hosts a netplay game on the local network,
  * "connect:<address>:<port>:<core>" joins one (from the beginning: the
  * host sends its game; with the host's emulator, NETPLAY_HOSTS).
+ * raw_path: a Files app "Play" (user request 2026-10-28) instead of a
+ * catalog game - mode/net forced to "new"/"", system from the extension,
+ * no history, no per-game overrides (session.raw_file, see struct session).
  */
 static const char *cheats_blocked(void);
 
@@ -3751,7 +3811,7 @@ static void exec_retroarch(char **argv, const char *base, const char *ra_dir,
 	_exit(127);
 }
 
-static const char *launch(const char *game, const char *mode, const char *net)
+static const char *launch(const char *game, const char *mode, const char *net, const char *raw_path)
 {
 	char answer[2 * PATH_MAX + 128];
 	char command[64];
@@ -3781,62 +3841,83 @@ static const char *launch(const char *game, const char *mode, const char *net)
 
 	if (session.state != SESSION_IDLE)
 		return "busy";
-	if (!net)
+	session.raw_file = raw_path != NULL;
+	if (raw_path) {
+		/* Files app "Play": always fresh, no netplay, no catalog. */
 		net = "";
-	if (!strncmp(net, "connect:", 8)) {
-		struct in_addr ip;
-		char *p;
-		char *q;
-		long port;
-
-		copy_text(net_address, sizeof(net_address), net + 8);
-		if (!(p = strchr(net_address, ':')))
-			return "net";
-		*p = '\0';
-		port = strtol(strchr(net + 8, ':') + 1, &q, 10);
-		if (inet_pton(AF_INET, net_address, &ip) != 1 || *q != ':' || port < 1 || port > 65535)
-			return "net";
-		snprintf(net_port, sizeof(net_port), "%ld", port);
-		copy_text(net_core, sizeof(net_core), q + 1);
 		mode = "new";
-	} else if (net[0] && strcmp(net, "host")) {
-		return "net";
-	}
-	if (!mode || !mode[0])
-		mode = "resume";
-	if (strcmp(mode, "resume") && strcmp(mode, "new") && strncmp(mode, "slot:", 5))
-		return "mode";
-	for (const char *p = game; *p; p++)
-		if (!isxdigit((unsigned char)*p))
-			return "game";
-	if (!game[0] || strlen(game) >= sizeof(session.game))
-		return "game";
-	if (!read_active_user(session.user, sizeof(session.user)))
-		return "no-user";
-	load_settings(session.user, &session.settings);
+		if (!read_active_user(session.user, sizeof(session.user)))
+			return "no-user";
+		load_settings(session.user, &session.settings);
+		if (!file_exists(raw_path))
+			return "unavailable";
+		session.game[0] = '\0';
+		if (!system_for_extension(raw_path, session.system, sizeof(session.system)))
+			return "no-core";
+		copy_text(session.content, sizeof(session.content), raw_path);
+		copy_text(session.rom, sizeof(session.rom), raw_path);
+		if (!resolve_core(session.system, session.core, sizeof(session.core),
+				  core_path, sizeof(core_path)))
+			return "no-core";
+		memset(&overrides, 0, sizeof(overrides));
+	} else {
+		if (!net)
+			net = "";
+		if (!strncmp(net, "connect:", 8)) {
+			struct in_addr ip;
+			char *p;
+			char *q;
+			long port;
 
-	snprintf(command, sizeof(command), "RESOLVE\t%s", game);
-	if (library_request(command, answer, sizeof(answer)) != 0)
-		return "library";
-	if (strncmp(answer, "ERR ", 4) == 0)
-		return strcmp(answer + 4, "unavailable") == 0 ? "unavailable" : "game";
-	if (strncmp(answer, "OK ", 3) != 0 || !(tab = strchr(answer + 3, '\t')))
-		return "library";
-	*tab = '\0';
-	/* A disc set: the playlist of all its discs, then the ROM itself. */
-	rom = strchr(tab + 1, '\t');
-	if (rom)
-		*rom++ = '\0';
-	copy_text(session.game, sizeof(session.game), game);
-	copy_text(session.system, sizeof(session.system), answer + 3);
-	copy_text(session.content, sizeof(session.content), tab + 1);
-	copy_text(session.rom, sizeof(session.rom), rom ? rom : tab + 1);
-	if (!file_exists(session.content))
-		return "unavailable";
-	if (!resolve_core(session.system, session.core, sizeof(session.core),
-			  core_path, sizeof(core_path)))
-		return "no-core";
-	load_overrides(session.user, game, &overrides);
+			copy_text(net_address, sizeof(net_address), net + 8);
+			if (!(p = strchr(net_address, ':')))
+				return "net";
+			*p = '\0';
+			port = strtol(strchr(net + 8, ':') + 1, &q, 10);
+			if (inet_pton(AF_INET, net_address, &ip) != 1 || *q != ':' || port < 1 || port > 65535)
+				return "net";
+			snprintf(net_port, sizeof(net_port), "%ld", port);
+			copy_text(net_core, sizeof(net_core), q + 1);
+			mode = "new";
+		} else if (net[0] && strcmp(net, "host")) {
+			return "net";
+		}
+		if (!mode || !mode[0])
+			mode = "resume";
+		if (strcmp(mode, "resume") && strcmp(mode, "new") && strncmp(mode, "slot:", 5))
+			return "mode";
+		for (const char *p = game; *p; p++)
+			if (!isxdigit((unsigned char)*p))
+				return "game";
+		if (!game[0] || strlen(game) >= sizeof(session.game))
+			return "game";
+		if (!read_active_user(session.user, sizeof(session.user)))
+			return "no-user";
+		load_settings(session.user, &session.settings);
+
+		snprintf(command, sizeof(command), "RESOLVE\t%s", game);
+		if (library_request(command, answer, sizeof(answer)) != 0)
+			return "library";
+		if (strncmp(answer, "ERR ", 4) == 0)
+			return strcmp(answer + 4, "unavailable") == 0 ? "unavailable" : "game";
+		if (strncmp(answer, "OK ", 3) != 0 || !(tab = strchr(answer + 3, '\t')))
+			return "library";
+		*tab = '\0';
+		/* A disc set: the playlist of all its discs, then the ROM itself. */
+		rom = strchr(tab + 1, '\t');
+		if (rom)
+			*rom++ = '\0';
+		copy_text(session.game, sizeof(session.game), game);
+		copy_text(session.system, sizeof(session.system), answer + 3);
+		copy_text(session.content, sizeof(session.content), tab + 1);
+		copy_text(session.rom, sizeof(session.rom), rom ? rom : tab + 1);
+		if (!file_exists(session.content))
+			return "unavailable";
+		if (!resolve_core(session.system, session.core, sizeof(session.core),
+				  core_path, sizeof(core_path)))
+			return "no-core";
+		load_overrides(session.user, game, &overrides);
+	}
 	load_achievements(session.user, &achievements);
 	session.hardcore = achievements.enabled && achievements.hardcore;
 	session.achievements_enabled = achievements.enabled;
@@ -4113,7 +4194,8 @@ static const char *launch(const char *game, const char *mode, const char *net)
 		session.game, session.system, session.core, (int)pid,
 		session.user, start, shader[0] ? shader : "none", render_height,
 		session.hardcore ? 1 : 0, net[0] ? net : "-", session.cheats_on);
-	library_session("SESSION_BEGIN", session.game);
+	if (!session.raw_file)
+		library_session("SESSION_BEGIN", session.game);
 	notify_subscribers();
 	return NULL;
 }
@@ -4411,7 +4493,8 @@ static void child_exited(int status)
 	if (session.pending != PENDING_NONE && !session.pending_quiet)
 		notify_state("game.state.failed", session.pending_slot,
 			     session.pending == PENDING_SAVE ? "save" : "load");
-	library_session("SESSION_END", session.game);
+	if (!session.raw_file)
+		library_session("SESSION_END", session.game);
 	if (failed && session.state == SESSION_RUNNING)
 		notify_failed(ran < START_FAILURE_MS ? "start" : "crash");
 	if (session.shot_fd > 0)
@@ -4422,7 +4505,7 @@ static void child_exited(int status)
 	copy_text(game, sizeof(game), session.game);
 	reset_session();
 	if (relaunch) {
-		const char *error = launch(game, "resume", "host");
+		const char *error = launch(game, "resume", "host", NULL);
 
 		if (!error)
 			return;
@@ -4605,6 +4688,8 @@ static void save_nds_choice(void)
 {
 	struct game_overrides o;
 
+	if (session.raw_file)
+		return;
 	load_overrides(session.user, session.game, &o);
 	copy_text(o.nds_layout, sizeof(o.nds_layout), nds_layouts[session.nds_layout].name);
 	copy_text(o.stylus, sizeof(o.stylus), session.stylus ? session.stylus_control : "off");
@@ -4866,6 +4951,8 @@ static const char *cheats_blocked(void)
 		return "hardcore";
 	if (session.net_launch[0] || session.netplay != NET_OFF)
 		return "netplay";
+	if (session.raw_file)
+		return "unavailable";
 	return NULL;
 }
 
@@ -5359,12 +5446,28 @@ static void handle_command(struct client *c, char *line)
 			if ((net = strchr(mode, '\t')))
 				*net++ = '\0';
 		}
-		error = launch(arg, mode, net);
+		error = launch(arg, mode, net, NULL);
 
 		if (error) {
 			char text[64];
 
 			log_msg("emud: launch %s refused: %s", arg, error);
+			if (session.state == SESSION_IDLE)
+				reset_session();
+			snprintf(text, sizeof(text), "ERR %s\n", error);
+			reply(c, text);
+		} else {
+			reply(c, "OK\n");
+		}
+	} else if (!strcmp(line, "LAUNCH_FILE") && arg) {
+		/* Files app "Play" (user request 2026-10-28): no catalog
+		 * entry, system from the extension (systems.conf). */
+		const char *error = launch(NULL, NULL, NULL, arg);
+
+		if (error) {
+			char text[64];
+
+			log_msg("emud: launch_file %s refused: %s", arg, error);
 			if (session.state == SESSION_IDLE)
 				reset_session();
 			snprintf(text, sizeof(text), "ERR %s\n", error);
@@ -5828,7 +5931,8 @@ int main(void)
 		}
 		if (!exited)
 			kill(-session.pid, SIGKILL);
-		library_session("SESSION_END", session.game);
+		if (!session.raw_file)
+			library_session("SESSION_END", session.game);
 	}
 	unlink(SOCKET_PATH);
 	unlink(PIDFILE);

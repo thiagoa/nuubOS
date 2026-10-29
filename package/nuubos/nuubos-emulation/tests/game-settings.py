@@ -24,8 +24,8 @@ open(share + '/systems.conf', 'w').write(open(lib + '/systems.conf').read())
 open(run + '/user/active', 'w').write(user + '\n')
 open(ud + '/roms/snes/Mario.sfc', 'w').write('x' * 64)
 open(ud + '/roms/psx/Crash.chd', 'w').write('x' * 64)
-open(emu_share + '/cores.conf', 'w').write('snes|snes9x,bsnes,missing\npsx|pcsx_rearmed\nn64|parallel_n64_nuubos\ndreamcast|flycast_nuubos\n')
-for c in ('snes9x', 'bsnes', 'pcsx_rearmed', 'parallel_n64_nuubos', 'flycast_nuubos'):
+open(emu_share + '/cores.conf', 'w').write('snes|snes9x,bsnes,missing\npsx|pcsx_rearmed\nn64|parallel_n64_nuubos\ndreamcast|flycast_nuubos\ngba|gpsp\n')
+for c in ('snes9x', 'bsnes', 'pcsx_rearmed', 'parallel_n64_nuubos', 'flycast_nuubos', 'gpsp'):
     open(cores + '/%s_libretro.so' % c, 'w').write('')
 open(emu_share + '/retroarch.cfg', 'w').write(
     'aspect_ratio_index = "22"\nvideo_smooth = "false"\nvideo_shader_enable = "true"\n'
@@ -115,7 +115,7 @@ subprocess.check_call(['gcc'] + common + ['-DUSERDATA_ROOT="%s"' % ud, '-DSHARE_
                        lib + '/libraryd.c', '-o', t + '/libraryd', '-lpthread'])
 subprocess.check_call(['gcc'] + common + ['-DUSERDATA="%s"' % ud, '-DSTATE_USERS="%s"' % state,
                        '-DSHARE_DIR="%s"' % emu_share, '-DBUNDLED_CORES="%s"' % cores,
-                       '-DCORE_INFO_DIR="%s"' % info,
+                       '-DCORE_INFO_DIR="%s"' % info, '-DSYSTEMS_CONF="%s/systems.conf"' % share,
                        '-DRETROARCH_BIN="%s"' % fake, '-DHDMI_ENABLED="%s/hdmi-enabled"' % t, pkg + '/emud.c', '-o', t + '/emud'])
 
 notes = []
@@ -486,6 +486,30 @@ try:
     check('join args', wait(lambda: os.path.exists(t + '/args')) and '--connect 192.168.1.9 --port 55436' in args()
           and '--entryslot' not in args() and 'mesen-s_libretro.so' in open(t + '/launched-core').read())
     cmd('emud.sock', 'QUIT'); wait(lambda: 'state=idle' in cmd('emud.sock', 'STATUS'))
+
+    # LAUNCH_FILE: the Files app "Play" action (user request 2026-10-28,
+    # personal fork feature), a raw file with no catalog entry at all -
+    # system from its extension (systems.conf), no history, no cheats.
+    os.makedirs(t + '/stash', exist_ok=True)
+    open(t + '/stash/Raw Game.gba', 'w').write('r' * 32)
+    open(t + '/stash/Raw Game.xyz', 'w').write('?')
+    open(t + '/stash/Raw Game.sfc', 'w').write('r' * 32)
+    for f in ('/args', '/last-session.cfg'):
+        if os.path.exists(t + f): os.remove(t + f)
+    check('launch_file unknown extension', cmd('emud.sock', 'LAUNCH_FILE\t' + t + '/stash/Raw Game.xyz') == 'ERR no-core\n')
+    check('launch_file missing file', cmd('emud.sock', 'LAUNCH_FILE\t' + t + '/stash/Nope.gba') == 'ERR unavailable\n')
+    check('launch_file ambiguous extension (sfc: snes and satellaview)',
+          cmd('emud.sock', 'LAUNCH_FILE\t' + t + '/stash/Raw Game.sfc') == 'ERR no-core\n')
+    check('launch_file', cmd('emud.sock', 'LAUNCH_FILE\t' + t + '/stash/Raw Game.gba') == 'OK\n')
+    check('launch_file session', wait(lambda: os.path.exists(t + '/last-session.cfg') and os.path.exists(t + '/args')))
+    st = cmd('emud.sock', 'STATUS')
+    check('launch_file no catalog game id', 'game=\n' in st)
+    check('launch_file system from extension', 'system=gba\n' in st)
+    check('launch_file core resolved', 'gpsp_libretro.so' in open(t + '/launched-core').read())
+    check('launch_file cheats unavailable', 'available=0\nreason=unavailable\n' in cmd('emud.sock', 'CHEATS'))
+    check('launch_file second launch refused while running', cmd('emud.sock', 'LAUNCH_FILE\t' + t + '/stash/Raw Game.gba') == 'ERR busy\n')
+    cmd('emud.sock', 'QUIT'); wait(lambda: 'state=idle' in cmd('emud.sock', 'STATUS'))
+    check('launch_file leaves no history', 'Raw Game' not in cmd('libraryd.sock', 'GAMES\tsystem:gba'))
 
     # LAN discovery: a fake RetroArch host answering the broadcast.
     import struct
