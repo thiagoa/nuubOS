@@ -1868,7 +1868,7 @@ pub fn handle_gaming(ui: &HomeWindow, action: &str) {
                 }
                 "slots" => {
                     let current = STATE.with(|st| emu_get(&st.borrow(), "slots"));
-                    let options = ["3", "5", "10", "20", "50", "99"].iter().map(|n| (n.to_string(), n.to_string())).collect();
+                    let options = ["3", "5", "10", "20", "30", "50", "99"].iter().map(|n| (n.to_string(), n.to_string())).collect();
                     open_settings_choice(ui, "emu-slots", &tr(ui, 769, "Save State Slots"), options, &current);
                 }
                 "position" => {
