@@ -1521,6 +1521,9 @@ fn refresh_controllers(ui: &HomeWindow) {
 
 /// Localized name of a logical controller control (Controllers service ids).
 pub(crate) fn control_label(ui: &HomeWindow, control: &str) -> String {
+    if control.is_empty() {
+        return tr(ui, 1418, "Not Assigned");
+    }
     let (index, fallback) = match control {
         "menu_confirm" => (337, "Face South"),
         "menu_back" => (338, "Face East"),
