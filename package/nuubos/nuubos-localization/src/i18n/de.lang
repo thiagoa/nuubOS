@@ -529,7 +529,7 @@
 528=Standard ({0})
 529=Wie das Spiel
 530=Vollbild
-531=Ganzzahlige Skalierung
+531=Skalierung
 532=Scharf
 533=Weich
 534=Pixelgenau
@@ -1419,3 +1419,7 @@
 1418=Hardcore-Modus
 1419=Spielen
 1420=Diese Datei konnte nicht gestartet werden
+1421=Ganzzahlig
+1422=Ganzzahlig (Overscan)
+1423=Aus
+1424=Smart

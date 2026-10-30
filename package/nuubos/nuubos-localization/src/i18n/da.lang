@@ -529,7 +529,7 @@
 528=Standard ({0})
 529=Som spillet
 530=Fuld skærm
-531=Heltalsskalering
+531=Skalering
 532=Skarp
 533=Blød
 534=Pixelperfekt
@@ -1419,3 +1419,7 @@
 1418=Hardcore-tilstand
 1419=Afspil
 1420=Kunne ikke afspille denne fil
+1421=Heltal
+1422=Heltal (beskæring)
+1423=Fra
+1424=Smart

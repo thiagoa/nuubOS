@@ -466,6 +466,13 @@ struct discovery {
 struct game_overrides {
 	char core[64];
 	char aspect[16];
+	/* The scaling policy independent of aspect (shape): "" (Smart, the
+	 * default), "integer" (always the floor factor), "overscale" (always
+	 * the ceiling factor, a modest crop instead of a bigger margin) or
+	 * "off" (no integer snapping at all). Combines freely with aspect,
+	 * e.g. "4:3" + "integer" (2026-10-30: split out of aspect, which used
+	 * to conflate shape and scaling policy into one choice). */
+	char scaling[16];
 	char filter[16];
 	char accuracy[16];
 	char cheat_file[PATH_MAX];
@@ -1714,6 +1721,8 @@ static void load_overrides(const char *user, const char *game, struct game_overr
 			copy_text(o->core, sizeof(o->core), eq);
 		else if (!strcmp(line, "aspect"))
 			copy_text(o->aspect, sizeof(o->aspect), eq);
+		else if (!strcmp(line, "scaling"))
+			copy_text(o->scaling, sizeof(o->scaling), eq);
 		else if (!strcmp(line, "filter"))
 			copy_text(o->filter, sizeof(o->filter), eq);
 		else if (!strcmp(line, "accuracy"))
@@ -1744,7 +1753,7 @@ static int save_overrides(const char *user, const char *game, const struct game_
 
 	overrides_path(user, game, path, sizeof(path));
 	/* Nothing overridden: no file, the game inherits everything. */
-	if (!o->core[0] && !o->aspect[0] && !o->filter[0] && !o->accuracy[0] &&
+	if (!o->core[0] && !o->aspect[0] && !o->scaling[0] && !o->filter[0] && !o->accuracy[0] &&
 	    !o->cheat_file[0] && !o->cheats[0] && !o->nds_layout[0] && !o->stylus[0] &&
 	    !o->n64_pak[0] && !o->resolution[0])
 		return unlink(path) == 0 || errno == ENOENT ? 0 : -1;
@@ -1759,6 +1768,8 @@ static int save_overrides(const char *user, const char *game, const struct game_
 		fprintf(fp, "core=%s\n", o->core);
 	if (o->aspect[0])
 		fprintf(fp, "aspect=%s\n", o->aspect);
+	if (o->scaling[0])
+		fprintf(fp, "scaling=%s\n", o->scaling);
 	if (o->filter[0])
 		fprintf(fp, "filter=%s\n", o->filter);
 	if (o->accuracy[0])
@@ -1789,7 +1800,14 @@ static int save_overrides(const char *user, const char *game, const struct game_
 static bool valid_aspect(const char *v)
 {
 	return !strcmp(v, "core") || !strcmp(v, "4:3") || !strcmp(v, "16:9") ||
-	       !strcmp(v, "full") || !strcmp(v, "integer") || !strcmp(v, "square");
+	       !strcmp(v, "full") || !strcmp(v, "square");
+}
+
+/* The scaling policy (struct game_overrides.scaling), independent of
+ * aspect (shape): see the struct's own comment. */
+static bool valid_scaling(const char *v)
+{
+	return !strcmp(v, "integer") || !strcmp(v, "overscale") || !strcmp(v, "off");
 }
 
 static bool valid_filter(const char *v)
@@ -2173,17 +2191,26 @@ static bool square_panel(void)
  * at most a share of its width (a TV's overscan) is cropped (RetroArch patch
  * 0006, NUUBOS_RA_OVERSCAN_X): with the default 8 %
  * (4 % a side) a 4:3 game on the 720x720 RG CubeXX is 783x587, not an
- * integer 2x with large margins (user decisions 2026-10-11: square screens
- * only, never HDMI or 4:3/3:2 panels; integer 3x cropped PS1 too much).
- * display.conf field 4 sets the share per system (PS1 5 %, user request
- * 2026-10-14: 8 % cut its borders a little too much). Only with the default
- * presentation (or the per-game Integer Scaling). 0 crops nothing: the
- * picture is as wide as the screen, any margin at the bottom (Dreamcast,
- * NAOMI, Atomiswave: user request 2026-10-21, their games use the whole
- * 640 pixels). Since 2026-10-22 0 is the default for every system (user:
- * "too much overscan on Saturn too, remove it from all cores"); a
- * display.conf field 4 can still set a share for one system. Returns the
- * percentage of the width that may be cropped, -1 = off. */
+ * integer 2x with large margins (or whatever the default Smart presentation
+ * falls back to — see write_presentation() below, investigation 2026-10-30).
+ * User decisions 2026-10-11: square screens only, never HDMI or 4:3/3:2
+ * panels; integer 3x cropped PS1 too much. display.conf field 4 sets the
+ * share per system (PS1 5 %, user request 2026-10-14: 8 % cut its borders
+ * a little too much). Only with the default presentation — neither Aspect
+ * Ratio nor Scaling overridden (2026-10-30: used to also fire whenever
+ * Aspect Ratio was left at its "integer" value, back when aspect conflated
+ * shape and scaling policy into one choice; found the same day that this
+ * meant it permanently pre-empted RetroArch's own Smart/Underscale/Overscale
+ * switch on the CubeXX even at 0 %, the shipped default:
+ * nuubos_overscan_keep() in the RetroArch patch treated "set to 0 %" as
+ * "crop nothing but still take over", not "off"; fixed, `pct > 0` not
+ * `pct >= 0`). 0 crops nothing: the picture is as wide as the screen, any
+ * margin at the bottom (Dreamcast, NAOMI, Atomiswave: user request
+ * 2026-10-21, their games use the whole 640 pixels). Since 2026-10-22 0 is
+ * the default for every system (user: "too much overscan on Saturn too,
+ * remove it from all cores"); a display.conf field 4 can still set a share
+ * for one system. Returns the percentage of the width that may be cropped,
+ * -1 = off. */
 #define TV_OVERSCAN_DEFAULT_PCT 0
 
 static int tv_overscan(const char *system, const struct game_overrides *o)
@@ -2191,7 +2218,7 @@ static int tv_overscan(const char *system, const struct game_overrides *o)
 	char screen[16], pct[16];
 	int value;
 
-	if (o->aspect[0] && strcmp(o->aspect, "integer"))
+	if (o->aspect[0] || o->scaling[0]) /* only the default presentation */
 		return -1;
 	if (!square_panel()) /* HDMI turns the panel off */
 		return -1;
@@ -2522,25 +2549,38 @@ static int write_session_shader(const char *shader)
 }
 
 /*
- * Picture presentation (A, B, I, L). Without a per-game override the game
- * gets integer scaling with the core's aspect (a PS1 game is 4:3 whatever
- * its resolution): whole vertical scale, width from the aspect; content
- * that would leave more than 12 % of the screen unused (GBA or PSP on
- * 640x480) is scaled to fit with its aspect instead (stock smart mode),
- * through sharp bilinear so no pixel is uneven. The picture is centred
- * horizontally and, when lower than the screen, at the user's Picture
- * Position (top, center or bottom; RetroArch patch 0003 still crops an
- * overscaled picture evenly); the per-game "integer" aspect is the same
- * picture without bezels. "square" is integer scaling with square pixels
- * (8:7 for a 256-pixel-wide NES/SNES picture, GitHub #15): RetroArch
- * patch 0014 lets it take the next vertical factor when that crops at
- * most 8 of the game's pixels a side (SNES 3x on 720x720 = 768x672, 720
- * wide). A bezel
- * leaves the picture as it is: RetroArch (patch 0010) draws it into the
- * rest of the screen from NUUBOS_RA_BEZEL (session.bezel_env); the CRT
- * look applies to TV systems (display.conf) unless
- * the game has its own filter. Returns the --set-shader argument ("" =
- * none).
+ * Picture presentation (A, B, I, L). Two independent per-game choices
+ * (2026-10-30, split from one conflated "aspect" that used to pin shape
+ * and scaling policy together, so e.g. "4:3" could never combine with true
+ * Integer Scaling even though RetroArch supports it natively): Aspect
+ * Ratio is the shape (o->aspect: core's own, 4:3, 16:9, full/stretch, or
+ * square pixels); Scaling is the policy (o->scaling: Smart the default,
+ * Integer always the floor factor, Integer Overscale always the ceiling
+ * factor, or Off — no integer snapping at all, plain aspect-fit). Without
+ * either override the game gets Smart integer scaling at the core's own
+ * aspect: whole vertical scale, width from the aspect; content that would
+ * leave more than 12 % of the screen unused (GBA or PSP on 640x480, or
+ * any 4:3 game on the RG CubeXX's square panel) is scaled to fit with its
+ * aspect instead — stock RetroArch's own Smart policy
+ * (video_scale_integer_scaling, gfx/video_driver.c), not anything nuubOS
+ * computes — through sharp bilinear so no pixel is uneven. The picture is
+ * centred horizontally and, when lower than the screen, at the user's
+ * Picture Position (top, center or bottom; RetroArch patch 0003 still
+ * crops an overscaled picture evenly). Square Pixels (8:7 for a
+ * 256-pixel-wide NES/SNES picture, GitHub #15) combines with any Scaling
+ * choice too; with the default Smart, RetroArch patch 0014 lets it take
+ * the next vertical factor when that crops at most 8 of the game's
+ * pixels a side (SNES 3x on 720x720 = 768x672, 720 wide) — that allowance
+ * is Smart-specific, Integer/Overscale use their own plain floor/ceiling
+ * either way. Overscale already crops a little to reach its bigger clean
+ * factor, so it also turns off RetroArch's own global Crop Overscan
+ * (video_crop_overscan, every core's standard RETRO_ENVIRONMENT_GET_OVERSCAN
+ * answer) for the session, so a core does not crop twice; every other
+ * choice leaves it on, RetroArch's own default. A bezel (only with both choices at their default) leaves
+ * the picture as it is: RetroArch (patch 0010) draws it into the rest of
+ * the screen from NUUBOS_RA_BEZEL (session.bezel_env); the CRT look
+ * applies to TV systems (display.conf) unless the game has its own
+ * filter. Returns the --set-shader argument ("" = none).
  */
 static const char *write_presentation(FILE *fp, const struct game_overrides *o)
 {
@@ -2550,13 +2590,14 @@ static const char *write_presentation(FILE *fp, const struct game_overrides *o)
 		"video_scale_integer_scaling", "video_scale_integer_axis",
 		"video_viewport_bias_x", "video_viewport_bias_y",
 		"video_viewport_bias_portrait_x", "video_viewport_bias_portrait_y",
-		"video_shader_enable", "video_smooth", NULL,
+		"video_shader_enable", "video_smooth", "video_crop_overscan", NULL,
 	};
 	char screen[16];
 	bool crt;
 	bool bezel = false;
 	bool integer = true;
 	int index = 22; /* the core's aspect */
+	const char *scaling = "2"; /* VIDEO_SCALE_INTEGER_SCALING_SMART */
 	const char *bias_y = !strcmp(session.settings.position, "top") ? "0.000000"
 			   : !strcmp(session.settings.position, "bottom") ? "1.000000"
 			   : "0.500000";
@@ -2565,32 +2606,52 @@ static const char *write_presentation(FILE *fp, const struct game_overrides *o)
 		remember_key(keys[i]);
 	system_screen(session.system, screen, sizeof(screen));
 	crt = session.settings.crt && !strcmp(screen, "crt") && !o->filter[0];
+
+	/* Shape. */
 	session.pixel_crop = !strcmp(o->aspect, "square");
-	if (session.pixel_crop) {
+	if (session.pixel_crop)
 		index = 21; /* square pixels */
-	} else if (o->aspect[0] && strcmp(o->aspect, "integer")) {
-		index = !strcmp(o->aspect, "4:3") ? 0
-		      : !strcmp(o->aspect, "16:9") ? 1
-		      : !strcmp(o->aspect, "full") ? 24
-		      : 22; /* core */
+	else if (!strcmp(o->aspect, "4:3"))
+		index = 0;
+	else if (!strcmp(o->aspect, "16:9"))
+		index = 1;
+	else if (!strcmp(o->aspect, "full"))
+		index = 24;
+	/* else "core" or unset: index stays 22, the core's own aspect. */
+
+	/* Scaling policy. Overscale already crops a little of the picture to
+	 * reach a bigger clean integer factor; RetroArch's own global Crop
+	 * Overscan (video_crop_overscan, answers every core's standard
+	 * RETRO_ENVIRONMENT_GET_OVERSCAN call, "Restart Required" so this
+	 * session-only value is exactly when it is read) would crop more on
+	 * top of that for no benefit, so it is off only with Overscale (user
+	 * request 2026-10-30); on otherwise, RetroArch's own default. */
+	const char *crop_overscan = "true";
+	if (!strcmp(o->scaling, "integer")) {
+		scaling = "0"; /* VIDEO_SCALE_INTEGER_SCALING_UNDERSCALE */
+	} else if (!strcmp(o->scaling, "overscale")) {
+		scaling = "1"; /* VIDEO_SCALE_INTEGER_SCALING_OVERSCALE */
+		crop_overscan = "false";
+	} else if (!strcmp(o->scaling, "off")) {
 		integer = false;
-	} else if (!strcmp(o->aspect, "integer")) {
-		/* the default presentation, without bezels */
-	} else if (session.settings.bezels) {
-		bezel = true;
 	}
+
+	if (!o->aspect[0] && !o->scaling[0] && session.settings.bezels)
+		bezel = true;
+
 	fprintf(fp,
 		"aspect_ratio_index = \"%d\"\n"
 		"video_scale_integer = \"%s\"\n"
-		"video_scale_integer_scaling = \"2\"\n"
+		"video_scale_integer_scaling = \"%s\"\n"
 		"video_scale_integer_axis = \"0\"\n"
 		"video_viewport_bias_x = \"0.500000\"\n"
 		"video_viewport_bias_y = \"%s\"\n"
 		"video_viewport_bias_portrait_x = \"0.500000\"\n"
 		"video_viewport_bias_portrait_y = \"%s\"\n"
-		"video_smooth = \"%s\"\n",
-		index, integer ? "true" : "false", bias_y, bias_y,
-		!strcmp(o->filter, "smooth") ? "true" : "false");
+		"video_smooth = \"%s\"\n"
+		"video_crop_overscan = \"%s\"\n",
+		index, integer ? "true" : "false", scaling, bias_y, bias_y,
+		!strcmp(o->filter, "smooth") ? "true" : "false", crop_overscan);
 
 	shader[0] = '\0';
 	session.bezel_env[0] = '\0';
@@ -4900,11 +4961,11 @@ static void handle_game_settings(struct client *c, const char *verb, char *arg)
 			res_default = "1x";
 		len = snprintf(out, sizeof(out),
 			       "core=%s\ncore_default=%s\ncore_override=%s\ncores=%s\n"
-			       "aspect=%s\nfilter=%s\nfilter_default=%s\n"
+			       "aspect=%s\nscaling=%s\nfilter=%s\nfilter_default=%s\n"
 			       "accuracy_supported=%d\naccuracy=%s\naccuracy_default=%s\n"
 			       "pak_supported=%d\npak=%s\n"
 			       "resolution_supported=%d\nresolution=%s\nresolution_default=%s\nend=1\n",
-			       effective, def_core, o.core, cores, o.aspect, o.filter,
+			       effective, def_core, o.core, cores, o.aspect, o.scaling, o.filter,
 			       settings.crt && !strcmp(screen, "crt") ? "crt" : "sharp",
 			       !strcmp(effective, MELONDS_NUUBOS) || flycast_core(effective),
 			       o.accuracy, accuracy_default,
@@ -4926,6 +4987,8 @@ static void handle_game_settings(struct client *c, const char *verb, char *arg)
 		copy_text(o.core, sizeof(o.core), fields[3]);
 	else if (!strcmp(fields[2], "aspect") && (!fields[3][0] || valid_aspect(fields[3])))
 		copy_text(o.aspect, sizeof(o.aspect), fields[3]);
+	else if (!strcmp(fields[2], "scaling") && (!fields[3][0] || valid_scaling(fields[3])))
+		copy_text(o.scaling, sizeof(o.scaling), fields[3]);
 	else if (!strcmp(fields[2], "filter") && (!fields[3][0] || valid_filter(fields[3])))
 		copy_text(o.filter, sizeof(o.filter), fields[3]);
 	else if (!strcmp(fields[2], "accuracy") &&

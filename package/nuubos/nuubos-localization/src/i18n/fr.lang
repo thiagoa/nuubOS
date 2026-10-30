@@ -529,7 +529,7 @@
 528=Par défaut ({0})
 529=Comme le jeu
 530=Plein écran
-531=Mise à l'échelle entière
+531=Mise à l'échelle
 532=Net
 533=Lisse
 534=Pixels nets
@@ -1419,3 +1419,7 @@
 1418=Mode Hardcore
 1419=Jouer
 1420=Impossible de lancer ce fichier
+1421=Entier
+1422=Entier (rognage)
+1423=Désactivé
+1424=Smart

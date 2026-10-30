@@ -529,7 +529,7 @@
 528=Standard ({0})
 529=Som spelet
 530=Helskärm
-531=Heltalsskalning
+531=Skalning
 532=Skarp
 533=Mjuk
 534=Pixelperfekt
@@ -1419,3 +1419,7 @@
 1418=Hardcore-läge
 1419=Spela
 1420=Det gick inte att spela den här filen
+1421=Heltal
+1422=Heltal (beskärning)
+1423=Av
+1424=Smart

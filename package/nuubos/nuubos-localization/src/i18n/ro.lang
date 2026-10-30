@@ -529,7 +529,7 @@
 528=Implicit ({0})
 529=Ca jocul
 530=Ecran complet
-531=Scalare întreagă
+531=Scalare
 532=Clar
 533=Neted
 534=Pixel perfect
@@ -1419,3 +1419,7 @@
 1418=Mod Hardcore
 1419=Joacă
 1420=Fișierul nu a putut fi rulat
+1421=Întreg
+1422=Întreg (decupare)
+1423=Dezactivat
+1424=Smart

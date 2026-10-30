@@ -529,7 +529,7 @@
 528=Domyślny ({0})
 529=Jak w grze
 530=Pełny ekran
-531=Skalowanie całkowite
+531=Skalowanie
 532=Ostry
 533=Gładki
 534=Idealne piksele
@@ -1419,3 +1419,7 @@
 1418=Tryb Hardcore
 1419=Graj
 1420=Nie można uruchomić tego pliku
+1421=Całkowite
+1422=Całkowite (przycięcie)
+1423=Wył.
+1424=Smart

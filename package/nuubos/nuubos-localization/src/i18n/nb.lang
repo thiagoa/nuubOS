@@ -529,7 +529,7 @@
 528=Standard ({0})
 529=Som spillet
 530=Fullskjerm
-531=Heltallsskalering
+531=Skalering
 532=Skarp
 533=Myk
 534=Pikselperfekt
@@ -1419,3 +1419,7 @@
 1418=Hardcore-modus
 1419=Spill
 1420=Kunne ikke spille denne filen
+1421=Heltall
+1422=Heltall (beskjæring)
+1423=Av
+1424=Smart

@@ -529,7 +529,7 @@
 528=Mặc định ({0})
 529=Như trò chơi
 530=Toàn màn hình
-531=Phóng to số nguyên
+531=Phóng to
 532=Sắc nét
 533=Mượt
 534=Pixel hoàn hảo
@@ -1419,3 +1419,7 @@
 1418=Chế độ Hardcore
 1419=Chơi
 1420=Không thể chơi tệp này
+1421=Số nguyên
+1422=Số nguyên (cắt viền)
+1423=Tắt
+1424=Smart

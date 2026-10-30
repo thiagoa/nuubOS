@@ -524,7 +524,8 @@ async function gamePage(id, from) {
 async function gameSettingsPage(id, system) {
   const s = await get('game_settings', { id, system }, true);
   const def = (v) => C(528, 'Default ({0})', v);
-  const aspects = { core: C(529, 'As the game'), '4:3': '4:3', '16:9': '16:9', full: C(530, 'Full Screen'), integer: C(531, 'Integer Scaling'), square: C(1413, 'Square Pixels') };
+  const aspects = { core: C(529, 'As the game'), '4:3': '4:3', '16:9': '16:9', full: C(530, 'Full Screen'), square: C(1413, 'Square Pixels') };
+  const scalings = { integer: C(1421, 'Integer'), overscale: C(1422, 'Integer (Overscale)'), off: C(1423, 'Off') };
   const filters = { sharp: C(532, 'Sharp'), smooth: C(533, 'Smooth'), pixel: C(534, 'Pixel Perfect'), crt: C(777, 'CRT Effect') };
   const accuracies = { fast: C(1315, 'Fast'), accurate: C(1316, 'Accurate') };
   const paks = { '': C(1340, 'Rumble Pak'), memory: C(1341, 'Controller Pak') };
@@ -537,8 +538,10 @@ async function gameSettingsPage(id, system) {
     nodes: [group(
       row({ key: 'core', title: C(525, 'Emulator'), value: s.core_override || def(s.core_default), chevron: true, disabled: cores.length < 2,
         on: () => pick('core', C(525, 'Emulator'), [{ value: '', label: def(s.core_default) }, ...cores.map((c) => ({ value: c, label: c }))], s.core_override) }),
-      row({ key: 'aspect', title: C(526, 'Aspect Ratio'), value: s.aspect ? aspects[s.aspect] || s.aspect : def(C(531, 'Integer Scaling')), chevron: true,
-        on: () => pick('aspect', C(526, 'Aspect Ratio'), [{ value: '', label: def(C(531, 'Integer Scaling')) }, ...Object.entries(aspects).map(([value, label]) => ({ value, label }))], s.aspect) }),
+      row({ key: 'aspect', title: C(526, 'Aspect Ratio'), value: s.aspect ? aspects[s.aspect] || s.aspect : def(C(529, 'As the game')), chevron: true,
+        on: () => pick('aspect', C(526, 'Aspect Ratio'), [{ value: '', label: def(C(529, 'As the game')) }, ...Object.entries(aspects).map(([value, label]) => ({ value, label }))], s.aspect) }),
+      row({ key: 'scaling', title: C(531, 'Scaling'), value: s.scaling ? scalings[s.scaling] || s.scaling : def(C(1424, 'Smart')), chevron: true,
+        on: () => pick('scaling', C(531, 'Scaling'), [{ value: '', label: def(C(1424, 'Smart')) }, ...Object.entries(scalings).map(([value, label]) => ({ value, label }))], s.scaling) }),
       row({ key: 'filter', title: C(527, 'Video Filter'), value: s.filter ? filters[s.filter] : def(filters[s.filter_default] || ''), chevron: true,
         on: () => pick('filter', C(527, 'Video Filter'), [{ value: '', label: def(filters[s.filter_default] || '') }, ...['sharp', 'smooth', 'pixel'].map((v) => ({ value: v, label: filters[v] }))], s.filter) }),
       s.accuracy_supported === '1' ? row({ key: 'accuracy', title: C(1314, 'Emulation Accuracy'),

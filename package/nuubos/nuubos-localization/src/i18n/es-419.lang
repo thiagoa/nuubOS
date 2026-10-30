@@ -529,7 +529,7 @@
 528=Predeterminado ({0})
 529=Como el juego
 530=Pantalla completa
-531=Escalado entero
+531=Escalado
 532=Nítido
 533=Suave
 534=Píxeles exactos
@@ -1419,3 +1419,7 @@
 1418=Modo Hardcore
 1419=Jugar
 1420=No se pudo reproducir este archivo
+1421=Entero
+1422=Entero (recorte)
+1423=Desactivado
+1424=Smart

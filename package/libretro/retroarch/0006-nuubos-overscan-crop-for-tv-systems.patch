@@ -24,8 +24,13 @@ Upstream-Status: Inappropriate [nuubOS specific]
 + * 4:3 game on 720x720 at 8 % is 783x587 at the top, its sides cropped
 + * evenly (patch 0003), instead of a small integer 2x or a 720x540 fit.
 + * Not integer: the sharp bilinear or CRT shader keeps the pixels even.
-+ * 0 % crops nothing: the picture is as wide as the screen, any margin
-+ * at the bottom. Returns the share of the width kept (0 = off). */
++ * 0 % crops nothing: the override steps aside and normal scaling
++ * (Smart/Underscale/Overscale) decides instead. Returns the share of
++ * the width kept, 0 = off (unset, or 0 %: `pct > 0` here, not `>= 0`,
++ * is what makes 0 % actually step aside instead of forcing a width-fit
++ * that happened to be numerically the same and so masked the bug: it
++ * silently overrode every Integer Scale mode, every time, nuubos-emud
++ * 2026-10-30). */
 +static float nuubos_overscan_keep(void)
 +{
 +   static float keep = -1.0f;
@@ -33,7 +38,7 @@ Upstream-Status: Inappropriate [nuubOS specific]
 +   {
 +      const char *s = getenv("NUUBOS_RA_OVERSCAN_X");
 +      int pct       = s ? atoi(s) : 0;
-+      keep          = (s && pct >= 0 && pct < 50) ? 1.0f - pct / 100.0f : 0.0f;
++      keep          = (s && pct > 0 && pct < 50) ? 1.0f - pct / 100.0f : 0.0f;
 +   }
 +   return keep;
 +}

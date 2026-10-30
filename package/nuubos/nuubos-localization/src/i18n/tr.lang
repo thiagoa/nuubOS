@@ -529,7 +529,7 @@
 528=Varsayılan ({0})
 529=Oyundaki gibi
 530=Tam ekran
-531=Tam sayı ölçekleme
+531=Ölçekleme
 532=Keskin
 533=Yumuşak
 534=Piksel kusursuz
@@ -1419,3 +1419,7 @@
 1418=Hardcore Modu
 1419=Oyna
 1420=Bu dosya oynatılamadı
+1421=Tam sayı
+1422=Tam sayı (overscan)
+1423=Kapalı
+1424=Smart

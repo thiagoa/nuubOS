@@ -529,7 +529,7 @@
 528=Predefinito ({0})
 529=Come il gioco
 530=Schermo intero
-531=Scala intera
+531=Scala
 532=Nitido
 533=Morbido
 534=Pixel perfetti
@@ -1419,3 +1419,7 @@
 1418=Modalità Hardcore
 1419=Gioca
 1420=Impossibile avviare questo file
+1421=Intero
+1422=Intero (overscan)
+1423=Disattivato
+1424=Smart

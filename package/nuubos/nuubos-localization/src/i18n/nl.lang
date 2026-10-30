@@ -529,7 +529,7 @@
 528=Standaard ({0})
 529=Zoals het spel
 530=Volledig scherm
-531=Gehele schaal
+531=Schaal
 532=Scherp
 533=Zacht
 534=Pixelperfect
@@ -1419,3 +1419,7 @@
 1418=Hardcore-modus
 1419=Spelen
 1420=Kan dit bestand niet afspelen
+1421=Geheel getal
+1422=Geheel getal (overscan)
+1423=Uit
+1424=Smart

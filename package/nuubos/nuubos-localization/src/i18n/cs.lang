@@ -529,7 +529,7 @@
 528=Výchozí ({0})
 529=Jako ve hře
 530=Celá obrazovka
-531=Celočíselné škálování
+531=Škálování
 532=Ostrý
 533=Hladký
 534=Pixel Perfect
@@ -1419,3 +1419,7 @@
 1418=Hardcore režim
 1419=Hrát
 1420=Soubor se nepodařilo spustit
+1421=Celočíselné
+1422=Celočíselné (oříznutí)
+1423=Vyp.
+1424=Smart

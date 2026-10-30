@@ -95,6 +95,7 @@ struct Details {
     core_override: String,
     cores: Vec<String>,
     aspect: String,
+    scaling: String,
     filter: String,
     filter_default: String,
     /* Emulation accuracy (melonDS-nuubOS only): override and default. */
@@ -321,6 +322,7 @@ fn parse_game_settings(reply: &str, d: &mut Details) {
             "core_override" => d.core_override = value.into(),
             "cores" => d.cores = value.split(',').filter(|c| !c.is_empty()).map(str::to_owned).collect(),
             "aspect" => d.aspect = value.into(),
+            "scaling" => d.scaling = value.into(),
             "filter" => d.filter = value.into(),
             "filter_default" => d.filter_default = value.into(),
             "accuracy_supported" => d.accuracy_supported = value == "1",
@@ -467,8 +469,20 @@ fn aspect_label(ui: &HomeWindow, v: &str) -> String {
         "4:3" => "4:3".into(),
         "16:9" => "16:9".into(),
         "full" => tr(ui, 530, "Full Screen"),
-        "integer" => tr(ui, 531, "Integer Scaling"),
         "square" => tr(ui, 1413, "Square Pixels"),
+        _ => String::new(),
+    }
+}
+
+/* The scaling policy (game_overrides.scaling in emud.c), independent of
+ * Aspect Ratio (shape): combines freely, e.g. "4:3" + "integer"
+ * (2026-10-30, split out of Aspect Ratio, which used to conflate the two
+ * into one choice). */
+fn scaling_label(ui: &HomeWindow, v: &str) -> String {
+    match v {
+        "integer" => tr(ui, 1421, "Integer"),
+        "overscale" => tr(ui, 1422, "Integer (Overscale)"),
+        "off" => tr(ui, 1423, "Off"),
         _ => String::new(),
     }
 }
@@ -521,8 +535,10 @@ fn build_rows(ui: &HomeWindow, st: &State, view: i32) -> Vec<(String, GenRow, bo
             } else {
                 rows.push(("core-get".into(), progress_row(tr(ui, 1254, "Downloading emulator"), st.core_progress), false));
             }
-            let aspect = if d.aspect.is_empty() { default_label(ui, &tr(ui, 531, "Integer Scaling")) } else { aspect_label(ui, &d.aspect) };
+            let aspect = if d.aspect.is_empty() { default_label(ui, &tr(ui, 529, "As the game")) } else { aspect_label(ui, &d.aspect) };
             rows.push(("aspect".into(), nav(tr(ui, 526, "Aspect Ratio"), aspect), true));
+            let scaling = if d.scaling.is_empty() { default_label(ui, &tr(ui, 1424, "Smart")) } else { scaling_label(ui, &d.scaling) };
+            rows.push(("scaling".into(), nav(tr(ui, 531, "Scaling"), scaling), true));
             let filter = if d.filter.is_empty() { default_label(ui, &filter_label(ui, &d.filter_default)) } else { filter_label(ui, &d.filter) };
             rows.push(("filter".into(), nav(tr(ui, 527, "Video Filter"), filter), true));
             if d.accuracy_supported {
@@ -1345,11 +1361,20 @@ fn open_core_choice(ui: &HomeWindow) {
 
 fn open_aspect_choice(ui: &HomeWindow) {
     let d = STATE.with(|st| st.borrow().details.clone());
-    let mut options = vec![(String::new(), default_label(ui, &tr(ui, 531, "Integer Scaling")))];
-    for v in ["core", "4:3", "16:9", "full", "integer", "square"] {
+    let mut options = vec![(String::new(), default_label(ui, &tr(ui, 529, "As the game")))];
+    for v in ["core", "4:3", "16:9", "full", "square"] {
         options.push((v.to_owned(), aspect_label(ui, v)));
     }
     open_settings_choice(ui, "game-aspect", &tr(ui, 526, "Aspect Ratio"), options, &d.aspect);
+}
+
+fn open_scaling_choice(ui: &HomeWindow) {
+    let d = STATE.with(|st| st.borrow().details.clone());
+    let mut options = vec![(String::new(), default_label(ui, &tr(ui, 1424, "Smart")))];
+    for v in ["integer", "overscale", "off"] {
+        options.push((v.to_owned(), scaling_label(ui, v)));
+    }
+    open_settings_choice(ui, "game-scaling", &tr(ui, 531, "Scaling"), options, &d.scaling);
 }
 
 fn accuracy_label(ui: &HomeWindow, v: &str) -> String {
@@ -1426,6 +1451,7 @@ pub fn apply_choice(ui: &HomeWindow, context: &str, value: String) {
         "game-core" => game_set(ui, "core", value),
         "game-core-get" => install_core(ui, value),
         "game-aspect" => game_set(ui, "aspect", value),
+        "game-scaling" => game_set(ui, "scaling", value),
         "game-filter" => game_set(ui, "filter", value),
         "game-accuracy" => game_set(ui, "accuracy", value),
         "game-pak" => game_set(ui, "pak", value),
@@ -1564,6 +1590,7 @@ fn details_confirm(ui: &HomeWindow, key: &str) {
             open_core_offer(ui)
         }
         "aspect" => open_aspect_choice(ui),
+        "scaling" => open_scaling_choice(ui),
         "filter" => open_filter_choice(ui),
         "accuracy" => open_accuracy_choice(ui),
         "pak" => open_pak_choice(ui),

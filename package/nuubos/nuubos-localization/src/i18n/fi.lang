@@ -529,7 +529,7 @@
 528=Oletus ({0})
 529=Kuten pelissä
 530=Koko näyttö
-531=Kokonaislukuskaalaus
+531=Skaalaus
 532=Terävä
 533=Pehmeä
 534=Pikselintarkka
@@ -1419,3 +1419,7 @@
 1418=Hardcore-tila
 1419=Pelaa
 1420=Tiedostoa ei voitu pelata
+1421=Kokonaisluku
+1422=Kokonaisluku (rajaus)
+1423=Pois
+1424=Smart

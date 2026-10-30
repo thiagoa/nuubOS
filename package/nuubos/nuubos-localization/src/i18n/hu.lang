@@ -529,7 +529,7 @@
 528=Alapértelmezett ({0})
 529=Mint a játékban
 530=Teljes képernyő
-531=Egész számú skálázás
+531=Skálázás
 532=Éles
 533=Lágy
 534=Pixelpontos
@@ -1419,3 +1419,7 @@
 1418=Hardcore mód
 1419=Játék
 1420=A fájl nem indítható el
+1421=Egész szám
+1422=Egész szám (vágás)
+1423=Ki
+1424=Smart
