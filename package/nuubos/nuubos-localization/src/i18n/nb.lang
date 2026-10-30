@@ -529,7 +529,7 @@
 528=Standard ({0})
 529=Som spillet
 530=Fullskjerm
-531=Heltallsskalering
+531=Skalering
 532=Skarp
 533=Myk
 534=Pikselperfekt
@@ -1416,3 +1416,7 @@
 1415=ROM-mappen på konsollens kort, delt av alle profiler
 1416=Spill på SD2
 1417=ROM-mappen på SD2-kortet; den venter mens kortet er tatt ut
+1418=Heltall
+1419=Heltall (beskjæring)
+1420=Av
+1421=Smart

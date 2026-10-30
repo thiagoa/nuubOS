@@ -529,7 +529,7 @@
 528=Oletus ({0})
 529=Kuten pelissä
 530=Koko näyttö
-531=Kokonaislukuskaalaus
+531=Skaalaus
 532=Terävä
 533=Pehmeä
 534=Pikselintarkka
@@ -1416,3 +1416,7 @@
 1415=Tämän konsolin kortin ROM-kansio, yhteinen kaikille profiileille
 1416=Pelit SD2-kortilla
 1417=SD2-kortin ROM-kansio; se odottaa, kun korttia ei ole
+1418=Kokonaisluku
+1419=Kokonaisluku (rajaus)
+1420=Pois
+1421=Smart

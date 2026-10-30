@@ -529,7 +529,7 @@
 528=Padrão ({0})
 529=Como o jogo
 530=Tela cheia
-531=Escala inteira
+531=Escala
 532=Nítido
 533=Suave
 534=Pixel perfeito
@@ -1416,3 +1416,7 @@
 1415=A pasta de ROMs do cartão deste console, compartilhada por todos os perfis
 1416=Jogos no SD2
 1417=A pasta de ROMs do cartão SD2; fica aguardando enquanto o cartão não estiver inserido
+1418=Inteira
+1419=Inteira (overscan)
+1420=Desligado
+1421=Smart

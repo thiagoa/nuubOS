@@ -529,7 +529,7 @@
 528=Alapértelmezett ({0})
 529=Mint a játékban
 530=Teljes képernyő
-531=Egész számú skálázás
+531=Skálázás
 532=Éles
 533=Lágy
 534=Pixelpontos
@@ -1416,3 +1416,7 @@
 1415=A konzol kártyáján lévő ROM-mappa, minden profil közösen használja
 1416=Játékok az SD2-n
 1417=Az SD2-kártya ROM-mappája; vár, amíg a kártya nincs behelyezve
+1418=Egész szám
+1419=Egész szám (vágás)
+1420=Ki
+1421=Smart

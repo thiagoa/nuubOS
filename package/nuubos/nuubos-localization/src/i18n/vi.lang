@@ -529,7 +529,7 @@
 528=Mặc định ({0})
 529=Như trò chơi
 530=Toàn màn hình
-531=Phóng to số nguyên
+531=Phóng to
 532=Sắc nét
 533=Mượt
 534=Pixel hoàn hảo
@@ -1416,3 +1416,7 @@
 1415=Thư mục ROM trên thẻ của máy này, dùng chung cho mọi hồ sơ
 1416=Trò chơi trên SD2
 1417=Thư mục ROM của thẻ SD2; sẽ chờ khi thẻ chưa được lắp
+1418=Số nguyên
+1419=Số nguyên (cắt viền)
+1420=Tắt
+1421=Smart

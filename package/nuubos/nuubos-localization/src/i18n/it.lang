@@ -529,7 +529,7 @@
 528=Predefinito ({0})
 529=Come il gioco
 530=Schermo intero
-531=Scala intera
+531=Scala
 532=Nitido
 533=Morbido
 534=Pixel perfetti
@@ -1416,3 +1416,7 @@
 1415=La cartella ROM della scheda di questa console, condivisa da tutti i profili
 1416=Giochi su SD2
 1417=La cartella ROM della scheda SD2; resta in attesa finché la scheda non è inserita
+1418=Intero
+1419=Intero (overscan)
+1420=Disattivato
+1421=Smart

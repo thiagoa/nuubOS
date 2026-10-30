@@ -529,7 +529,7 @@
 528=Standaard ({0})
 529=Zoals het spel
 530=Volledig scherm
-531=Gehele schaal
+531=Schaal
 532=Scherp
 533=Zacht
 534=Pixelperfect
@@ -1416,3 +1416,7 @@
 1415=De ROM-map op de kaart van deze console, gedeeld door alle profielen
 1416=Games op SD2
 1417=De ROM-map van de SD2-kaart; die wacht zolang de kaart ontbreekt
+1418=Geheel getal
+1419=Geheel getal (overscan)
+1420=Uit
+1421=Smart

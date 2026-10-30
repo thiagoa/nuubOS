@@ -505,7 +505,7 @@ pub fn action(b: &Value) -> R {
         "emu.quit" => { sock_ok("emud", "QUIT")?; ok() }
         "game.set" => {
             sock_ok("emud", &format!("GAME_SET\t{}\t{}\t{}\t{}", game_id(&a("id"))?, token(&a("system"))?,
-                one_of(&a("key"), &["core", "aspect", "filter", "accuracy", "pak", "resolution"])?, plain(&a("value"), 64)?))?;
+                one_of(&a("key"), &["core", "aspect", "scaling", "filter", "accuracy", "pak", "resolution"])?, plain(&a("value"), 64)?))?;
             ok()
         }
         "game.reset" => { sock_ok("emud", &format!("GAME_RESET\t{}", game_id(&a("id"))?))?; ok() }

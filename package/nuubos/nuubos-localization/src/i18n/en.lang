@@ -529,7 +529,7 @@
 528=Default ({0})
 529=As the game
 530=Full Screen
-531=Integer Scaling
+531=Scaling
 532=Sharp
 533=Smooth
 534=Pixel Perfect
@@ -1416,3 +1416,7 @@
 1415=The ROM folder on this console's card, shared by every profile
 1416=Games on SD2
 1417=The SD2 card's ROM folder; it waits while the card is out
+1418=Integer
+1419=Integer (Overscale)
+1420=Off
+1421=Smart
