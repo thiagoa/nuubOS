@@ -390,7 +390,7 @@ fn emu_get(st: &State, key: &str) -> String {
 }
 
 /* Game hotkey actions in page order, with their labels. */
-const HOTKEYS: [(&str, usize, &str); 9] = [
+const HOTKEYS: [(&str, usize, &str); 10] = [
     ("save_state", 417, "Save State"),
     ("load_state", 418, "Load State"),
     ("slot_next", 779, "Next Slot"),
@@ -401,6 +401,10 @@ const HOTKEYS: [(&str, usize, &str); 9] = [
     /* Nintendo DS (melonDS-nuubOS) */
     ("screen_layout", 1302, "Screen Layout"),
     ("stylus", 1307, "Stylus"),
+    /* Opens RetroArch's own menu (the Quick Menu's "RetroArch" row);
+     * does nothing unless RetroArch in the Quick Menu is on, and ships
+     * with no chord assigned (user decision 2026-10-30). */
+    ("advanced", 421, "RetroArch"),
 ];
 
 /* Controls a hotkey can use (Quick Menu button + this control). */
@@ -2464,7 +2468,8 @@ fn page_confirm(ui: &HomeWindow, view: i32, key: &str) {
                 let label = HOTKEYS.iter().find(|h| h.0 == action).map(|h| tr(ui, h.1, h.2)).unwrap_or_default();
                 (label, emu_get(&st, &format!("hotkey_{action}")))
             });
-            let options = HOTKEY_CONTROLS.iter().map(|c| (c.to_string(), crate::control_label(ui, c))).collect();
+            let mut options = vec![(String::new(), crate::control_label(ui, ""))];
+            options.extend(HOTKEY_CONTROLS.iter().map(|c| (c.to_string(), crate::control_label(ui, c))));
             open_settings_choice(ui, &format!("emu-hotkey:{action}"), &label, options, &current);
         }
         (56, "ov-on") => {

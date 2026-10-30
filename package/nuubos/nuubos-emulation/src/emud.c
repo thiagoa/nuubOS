@@ -263,18 +263,22 @@ enum hotkey_index {
 	HK_SCREENSHOT,
 	HK_SCREEN_LAYOUT,
 	HK_STYLUS,
+	HK_ADVANCED,
 	HK_COUNT,
 };
 
 static const char *const hotkey_actions[HK_COUNT] = {
 	"save_state", "load_state", "slot_next", "slot_prev",
 	"fast_forward", "quit", "screenshot", "screen_layout", "stylus",
+	"advanced",
 };
 
-/* nuubos-controllersd control ids (the user's mapping applies). */
+/* nuubos-controllersd control ids (the user's mapping applies); "" is
+ * unbound (advanced ships with no chord, user decision 2026-10-30: it
+ * only does anything once RetroArch in the Quick Menu is turned on). */
 static const char *const hotkey_defaults[HK_COUNT] = {
 	"r1", "l1", "menu_up", "menu_down", "face_north", "settings", "l2",
-	"select", "r2",
+	"select", "r2", "",
 };
 
 static const char *const hotkey_controls[] = {
@@ -1971,7 +1975,7 @@ static bool settings_set(struct emu_settings *e, const char *key, const char *v)
 		for (int i = 0; i < HK_COUNT; i++) {
 			if (strcmp(key + 7, hotkey_actions[i]))
 				continue;
-			if (!word_in(hotkey_controls, v))
+			if (v[0] && !word_in(hotkey_controls, v))
 				return false;
 			copy_text(e->hotkey[i], sizeof(e->hotkey[i]), v);
 			return true;
@@ -4770,6 +4774,15 @@ static void set_nds_layout(int layout)
 	notify_subscribers();
 }
 
+/* RetroArch Advanced: RetroArch's own menu over the game, for power
+ * users; it pauses the content itself. Shared by the ADVANCED command
+ * (Quick Menu "RetroArch" row) and the advanced hotkey below. */
+static void open_retroarch_advanced(void)
+{
+	ra_command("SET_PAUSED 0");
+	ra_command("MENU_TOGGLE");
+}
+
 static void handle_hotkey(const char *action)
 {
 	if (session.state != SESSION_RUNNING)
@@ -4833,6 +4846,14 @@ static void handle_hotkey(const char *action)
 		game_cpu_update();
 		notify_fast_forward(session.fast_forward);
 		notify_subscribers();
+	} else if (!strcmp(action, "advanced")) {
+		/* Only while the Quick Menu's "RetroArch" row is enabled
+		 * (user decision 2026-10-30): the hotkey bypasses that row,
+		 * so it needs its own gate instead of relying on the UI
+		 * hiding the entry point. */
+		if (!session.settings.retroarch_menu)
+			return;
+		open_retroarch_advanced();
 	}
 }
 
@@ -5658,8 +5679,7 @@ static void handle_command(struct client *c, char *line)
 		 * power users; it pauses the content itself. */
 		if (!running(c))
 			return;
-		ra_command("SET_PAUSED 0");
-		ra_command("MENU_TOGGLE");
+		open_retroarch_advanced();
 		reply(c, "OK\n");
 	} else if (!strcmp(line, "QUIT")) {
 		if (!session_running(c))

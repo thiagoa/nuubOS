@@ -294,13 +294,21 @@ try:
     check('settings defaults', 'slots=10\n' in st0 and 'slot_rotation=1\n' in st0 and 'crt=1\n' in st0
           and 'hotkey_save_state=r1\n' in st0 and 'hotkey_quit=settings\n' in st0
           and 'position=center\n' in st0)
+    # The advanced (RetroArch Advanced) hotkey ships unassigned, unlike
+    # every other hotkey (user decision 2026-10-30).
+    check('advanced hotkey unassigned by default', 'hotkey_advanced=\n' in st0)
     check('reject position', cmd('emud.sock', 'SET\tposition\tleft').startswith('ERR'))
     check('reject slots', cmd('emud.sock', 'SET\tslots\t0').startswith('ERR'))
     check('reject hotkey', cmd('emud.sock', 'SET\thotkey_quit\tquick_menu').startswith('ERR'))
+    check('reject bad advanced hotkey', cmd('emud.sock', 'SET\thotkey_advanced\tquick_menu').startswith('ERR'))
     check('reject overlay item', cmd('emud.sock', 'SET\toverlay_items\tfps,disk').startswith('ERR'))
     check('set slots', cmd('emud.sock', 'SET\tslots\t3').startswith('OK'))
     check('set hotkey', cmd('emud.sock', 'SET\thotkey_quit\tl3').startswith('OK'))
     check('settings stored', 'hotkey_quit=l3\n' in cmd('emud.sock', 'SETTINGS'))
+    check('assign advanced hotkey', cmd('emud.sock', 'SET\thotkey_advanced\tl3').startswith('OK')
+          and 'hotkey_advanced=l3\n' in cmd('emud.sock', 'SETTINGS'))
+    check('unassign advanced hotkey', cmd('emud.sock', 'SET\thotkey_advanced\t').startswith('OK')
+          and 'hotkey_advanced=\n' in cmd('emud.sock', 'SETTINGS'))
     check('crt filter default', 'filter_default=crt\n' in cmd('emud.sock', 'GAME_SETTINGS\t%s\tsnes' % game))
     check('set crt off', cmd('emud.sock', 'SET\tcrt\t0').startswith('OK'))
     check('sharp filter default', 'filter_default=sharp\n' in cmd('emud.sock', 'GAME_SETTINGS\t%s\tsnes' % game))

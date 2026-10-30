@@ -1723,6 +1723,10 @@ enum pad_control {
 };
 
 #define PAD_AXIS_FIRST PAD_LX
+/* A hotkey action with no chord assigned (user decision 2026-10-30: the
+ * advanced hotkey ships unbound). Never a real index into PAD_CONTROL_COUNT
+ * arrays; game_hotkey_event() must filter it out before any such lookup. */
+#define PAD_UNBOUND ((enum pad_control)-1)
 #define PAD_AXIS_MAX 32767
 
 struct pad_control_def {
@@ -1822,7 +1826,7 @@ struct game_hotkey {
 	const char *action;
 };
 
-#define GAME_HOTKEY_COUNT 9
+#define GAME_HOTKEY_COUNT 10
 
 /* Defaults; the Emulation Service sends the user's chords (HOTKEYS) when it
  * takes the gamepads, and again when the user changes them. */
@@ -1836,6 +1840,7 @@ static const struct game_hotkey default_game_hotkeys[GAME_HOTKEY_COUNT] = {
 	{ PAD_L2, "screenshot" },
 	{ PAD_SELECT, "screen_layout" },
 	{ PAD_R2, "stylus" },
+	{ PAD_UNBOUND, "advanced" },
 };
 static struct game_hotkey game_hotkeys[GAME_HOTKEY_COUNT];
 /* Chord controls held through an axis (hat D-pad, analog trigger): edge
@@ -2641,8 +2646,12 @@ static bool game_hotkey_event(const struct input_dev *input,
 		return true;
 	for (i = 0; i < GAME_HOTKEY_COUNT; i++) {
 		enum pad_control c = game_hotkeys[i].control;
-		const struct pad_source *src = &map->src[c];
+		const struct pad_source *src;
 		bool fire = false;
+
+		if (c == PAD_UNBOUND)
+			continue;
+		src = &map->src[c];
 
 		if (src->code < 0 || src->code != ev->code)
 			continue;
