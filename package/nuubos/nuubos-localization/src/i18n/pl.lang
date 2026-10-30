@@ -529,7 +529,7 @@
 528=Domyślny ({0})
 529=Jak w grze
 530=Pełny ekran
-531=Skalowanie całkowite
+531=Skalowanie
 532=Ostry
 533=Gładki
 534=Idealne piksele
@@ -1416,3 +1416,7 @@
 1415=Folder ROM na karcie tej konsoli, wspólny dla wszystkich profili
 1416=Gry na SD2
 1417=Folder ROM karty SD2; czeka, dopóki karta nie zostanie włożona
+1418=Całkowite
+1419=Całkowite (przycięcie)
+1420=Wył.
+1421=Smart

@@ -529,7 +529,7 @@
 528=Implicit ({0})
 529=Ca jocul
 530=Ecran complet
-531=Scalare întreagă
+531=Scalare
 532=Clar
 533=Neted
 534=Pixel perfect
@@ -1416,3 +1416,7 @@
 1415=Dosarul de ROM-uri de pe cardul acestei console, comun tuturor profilurilor
 1416=Jocuri pe SD2
 1417=Dosarul de ROM-uri al cardului SD2; așteaptă cât timp cardul lipsește
+1418=Întreg
+1419=Întreg (decupare)
+1420=Dezactivat
+1421=Smart

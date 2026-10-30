@@ -529,7 +529,7 @@
 528=Výchozí ({0})
 529=Jako ve hře
 530=Celá obrazovka
-531=Celočíselné škálování
+531=Škálování
 532=Ostrý
 533=Hladký
 534=Pixel Perfect
@@ -1416,3 +1416,7 @@
 1415=Složka ROM na kartě této konzole, sdílená všemi profily
 1416=Hry na SD2
 1417=Složka ROM karty SD2; čeká, dokud karta není vložena
+1418=Celočíselné
+1419=Celočíselné (oříznutí)
+1420=Vyp.
+1421=Smart

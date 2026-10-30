@@ -529,7 +529,7 @@
 528=Default ({0})
 529=Seperti game
 530=Layar penuh
-531=Skala bilangan bulat
+531=Skala
 532=Tajam
 533=Halus
 534=Pixel perfect
@@ -1416,3 +1416,7 @@
 1415=Folder ROM di kartu konsol ini, dipakai bersama semua profil
 1416=Game di SD2
 1417=Folder ROM kartu SD2; menunggu selama kartu tidak terpasang
+1418=Bilangan bulat
+1419=Bilangan bulat (overscan)
+1420=Mati
+1421=Smart

@@ -529,7 +529,7 @@
 528=Varsayılan ({0})
 529=Oyundaki gibi
 530=Tam ekran
-531=Tam sayı ölçekleme
+531=Ölçekleme
 532=Keskin
 533=Yumuşak
 534=Piksel kusursuz
@@ -1416,3 +1416,7 @@
 1415=Bu konsolun kartındaki ROM klasörü, tüm profiller tarafından paylaşılır
 1416=SD2'deki oyunlar
 1417=SD2 kartının ROM klasörü; kart takılı değilken bekler
+1418=Tam sayı
+1419=Tam sayı (overscan)
+1420=Kapalı
+1421=Smart
