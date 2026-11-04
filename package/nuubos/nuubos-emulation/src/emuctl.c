@@ -36,8 +36,10 @@ static void usage(void)
 		"  hotkey ACTION [ARG]            run a game hotkey (screen_layout, stylus right...)\n"
 		"  quit\n"
 		"  game-settings GAME SYSTEM       per-game overrides of the active user\n"
-		"  game-set GAME SYSTEM core|aspect|filter|accuracy|pak|resolution VALUE (\"\" = inherit)\n"
+		"  game-set GAME SYSTEM core|aspect|filter|accuracy|pak|resolution|remap_CONTROL VALUE (\"\" = inherit)\n"
 		"  game-reset GAME\n"
+		"  system-settings SYSTEM         System Settings of the active user\n"
+		"  system-set SYSTEM KEY VALUE    as game-set, for every game of the system\n"
 		"  states [GAME_ID]               save states (running game or GAME_ID)\n"
 		"  settings                       emulation settings of the active user\n"
 		"  set KEY VALUE\n"
@@ -95,6 +97,11 @@ int main(int argc, char **argv)
 	} else if (!strcmp(verb, "game-set") && argc == 6) {
 		snprintf(command, sizeof(command), "GAME_SET\t%s\t%s\t%s\t%s\n",
 			 argv[2], argv[3], argv[4], argv[5]);
+	} else if (!strcmp(verb, "system-settings") && argc == 3) {
+		snprintf(command, sizeof(command), "SYSTEM_SETTINGS\t%s\n", argv[2]);
+		multi = 1;
+	} else if (!strcmp(verb, "system-set") && argc == 5) {
+		snprintf(command, sizeof(command), "SYSTEM_SET\t%s\t%s\t%s\n", argv[2], argv[3], argv[4]);
 	} else if (!strcmp(verb, "game-reset") && argc == 3) {
 		snprintf(command, sizeof(command), "GAME_RESET\t%s\n", argv[2]);
 	} else if (!strcmp(verb, "hotkey") && (argc == 3 || argc == 4)) {

@@ -363,7 +363,9 @@ static const char *start_foot(void)
 	return NULL;
 }
 
-/* HOTKEY lines from inputd (the keyboard button). */
+static void quit_session(void);
+
+/* HOTKEY lines from inputd (the keyboard button; quit = H + Start). */
 static void process_input(void)
 {
 	ssize_t n = read(s.input, s.inbuf + s.inbuf_used, sizeof(s.inbuf) - s.inbuf_used - 1);
@@ -383,6 +385,8 @@ static void process_input(void)
 		if (s.state == RUNNING && !strcmp(s.inbuf, "HOTKEY keyboard")) {
 			s.keyboard = !s.keyboard;
 			publish();
+		} else if (!strcmp(s.inbuf, "HOTKEY quit")) {
+			quit_session();
 		}
 		memmove(s.inbuf, nl + 1, s.inbuf_used - (size_t)(nl + 1 - s.inbuf) + 1);
 		s.inbuf_used -= (size_t)(nl + 1 - s.inbuf);

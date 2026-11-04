@@ -135,6 +135,11 @@ try:
           and 'show_unavailable=1' in cmd('STATUS'))
     check('setting saved', 'SHOW_UNAVAILABLE=1' in open(t + '/state/config/nuubos-library.conf').read())
     check('bad value refused', cmd('SHOW_UNAVAILABLE\t2').startswith('ERR'))
+    # Home rows going round (GitHub #28): on by default, saved with the rest.
+    check('wrap rows on by default', 'wrap_rows=1' in st)
+    check('wrap rows off', cmd('WRAP_ROWS\t0').startswith('OK') and 'wrap_rows=0' in cmd('STATUS')
+          and 'SHOW_UNAVAILABLE=1\nWRAP_ROWS=0\n' == open(t + '/state/config/nuubos-library.conf').read())
+    check('wrap rows bad value refused', cmd('WRAP_ROWS\tx').startswith('ERR'))
     check('unavailable game deleted', cmd('DELETE\t%s\tCONFIRM' % zelda).startswith('OK'))
     check('unavailable: metadata and tried mark removed', not os.path.exists(ud + '/library/metadata/snes/Zelda.txt')
           and not os.path.exists(ud + '/library/metadata/snes/Zelda.tried'))

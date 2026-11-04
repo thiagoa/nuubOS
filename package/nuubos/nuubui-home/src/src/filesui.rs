@@ -822,7 +822,7 @@ fn actions(ui: &HomeWindow) {
          * Shown for any file; nuubos-emud itself rejects an extension no
          * system claims. */
         if pane.marks.is_empty() && focused.as_ref().is_some_and(|e| !e.dir) {
-            opts.push(("play".into(), tr(ui, 1419, "Play")));
+            opts.push(("play".into(), tr(ui, 1477, "Play")));
         }
         if n > 0 {
             opts.push(("add-library".into(), tr(ui, 1275, "Add to Library")));
@@ -1412,7 +1412,7 @@ pub fn apply_choice(ui: &HomeWindow, context: &str, value: String) {
                         if reply.trim() != "OK" {
                             let _ = slint::invoke_from_event_loop(move || {
                                 let Some(ui) = weak.upgrade() else { return };
-                                files_notice(&ui, tr(&ui, 1420, "Could not play this file"));
+                                files_notice(&ui, tr(&ui, 1478, "Could not play this file"));
                             });
                         }
                     });

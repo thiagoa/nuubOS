@@ -285,6 +285,111 @@ try:
     cmd('emud.sock', 'GAME_RESET\t' + psx)
     open(t + '/hdmi-enabled', 'w').write('disabled\n')
 
+    # Frameskip (GitHub #23): Off / Auto / Max per game and per system,
+    # written for the session only; the user's core options come back.
+    def psx_frameskip():
+        ok = cmd('emud.sock', 'LAUNCH\t' + psx).startswith('OK')
+        ok = ok and wait(lambda: 'state=running' in cmd('emud.sock', 'STATUS'))
+        opts = dict(l.split(' = ', 1) for l in open(copts).read().splitlines() if ' = ' in l)
+        cmd('emud.sock', 'QUIT')
+        ok = ok and wait(lambda: 'state=idle' in cmd('emud.sock', 'STATUS'))
+        return ok and (opts.get('pcsx_rearmed_frameskip_type'), opts.get('pcsx_rearmed_frameskip_interval'))
+    check('frameskip not for snes', 'frameskip_supported=0\n' in cmd('emud.sock', 'GAME_SETTINGS\t%s\tsnes' % game))
+    check('frameskip psx default off', 'frameskip_supported=1\nframeskip=\nframeskip_default=off\n'
+          in cmd('emud.sock', 'GAME_SETTINGS\t%s\tpsx' % psx))
+    check('reject bad frameskip', cmd('emud.sock', 'GAME_SET\t%s\tpsx\tframeskip\t5' % psx).startswith('ERR'))
+    check('no frameskip choice keeps the user options', psx_frameskip() == (None, None))
+    cmd('emud.sock', 'GAME_SET\t%s\tpsx\tframeskip\tmax' % psx)
+    check('frameskip max in the session', psx_frameskip() == ('"auto"', '"3"'))
+    check('frameskip user options restored', 'pcsx_rearmed_frameskip_type = "disabled"' in open(copts).read()
+          and 'frameskip_default=off\n' in cmd('emud.sock', 'GAME_SETTINGS\t%s\tpsx' % psx))
+    cmd('emud.sock', 'GAME_SET\t%s\tpsx\tframeskip\tauto' % psx)
+    check('frameskip auto in the session', psx_frameskip() == ('"auto"', '"1"'))
+    cmd('emud.sock', 'GAME_RESET\t' + psx)
+    cmd('emud.sock', 'SYSTEM_SET\tpsx\tframeskip\tmax')
+    check('frameskip follows the system', 'system_frameskip=max\n' in cmd('emud.sock', 'GAME_SETTINGS\t%s\tpsx' % psx)
+          and psx_frameskip() == ('"auto"', '"3"'))
+    cmd('emud.sock', 'SYSTEM_RESET\tpsx')
+
+    # System Settings (GitHub #12): a game's unset key follows its system.
+    sysdir = '%s/users/%s/appdata/nuubos-emulation/systems' % (ud, user)
+    ss = cmd('emud.sock', 'SYSTEM_SETTINGS\tpsx')
+    check('system defaults', 'core=pcsx_rearmed\n' in ss and 'resolution=\n' in ss and 'games=0\n' in ss)
+    check('system rejects bad value', cmd('emud.sock', 'SYSTEM_SET\tpsx\tresolution\t4x').startswith('ERR'))
+    check('system rejects bad name', cmd('emud.sock', 'SYSTEM_SETTINGS\t../x').startswith('ERR'))
+    check('system set', cmd('emud.sock', 'SYSTEM_SET\tpsx\tresolution\t2x').startswith('OK')
+          and cmd('emud.sock', 'SYSTEM_SET\tpsx\taspect\t16:9').startswith('OK')
+          and open(sysdir + '/psx.conf').read() == 'aspect=16:9\nresolution=2x\n')
+    gs = cmd('emud.sock', 'GAME_SETTINGS\t%s\tpsx' % psx)
+    check('game lists its system values', 'resolution=\n' in gs and 'system_resolution=2x\n' in gs
+          and 'system_aspect=16:9\n' in gs and 'aspect=\n' in gs)
+    check('game follows its system', psx_session(False) == 'enabled'
+          and 'aspect_ratio_index = "1"' in open(t + '/last-session.cfg').read())
+    cmd('emud.sock', 'GAME_SET\t%s\tpsx\tresolution\t1x' % psx)
+    check('game choice wins over the system', psx_session(False) == 'disabled')
+    check('system counts the games with their own', 'games=1\n' in cmd('emud.sock', 'SYSTEM_SETTINGS\tpsx'))
+    cmd('emud.sock', 'GAME_SET\t%s\tpsx\tcpu_level\t2' % psx)
+    open('%s/users/%s/appdata/nuubos-emulation/games/%s.conf' % (ud, user, psx), 'a').write('nds_layout=hybrid\n')
+    check('system resets its games', cmd('emud.sock', 'SYSTEM_RESET_GAMES\tpsx') == 'OK 1\n'
+          and 'games=0\n' in cmd('emud.sock', 'SYSTEM_SETTINGS\tpsx')
+          and open('%s/users/%s/appdata/nuubos-emulation/games/%s.conf' % (ud, user, psx)).read() == 'nds_layout=hybrid\n')
+    snes_ss = cmd('emud.sock', 'SYSTEM_SET\tsnes\tcore\tbsnes')
+    check('system emulator is the game default', snes_ss.startswith('OK')
+          and 'core_default=bsnes\n' in cmd('emud.sock', 'GAME_SETTINGS\t%s\tsnes' % game))
+    check('other system untouched', 'system_core=\n' in cmd('emud.sock', 'GAME_SETTINGS\t%s\tn64' % game))
+    check('system reset', cmd('emud.sock', 'SYSTEM_RESET\tpsx').startswith('OK')
+          and cmd('emud.sock', 'SYSTEM_RESET\tsnes').startswith('OK') and os.listdir(sysdir) == [])
+    cmd('emud.sock', 'GAME_RESET\t' + psx)
+    open(t + '/hdmi-enabled', 'w').write('disabled\n')
+
+    # Controls (user request 2026-10-29): per system, per game, sent to
+    # inputd as REMAP after the hotkeys.
+    input_lines = []
+    isrv = socket.socket(socket.AF_UNIX)
+    isrv.bind(run + '/inputd.sock')
+    isrv.listen(8)
+    def input_conn(conn):
+        f = conn.makefile('rw')
+        for line in f:
+            input_lines.append(line.strip())
+            if line.startswith('GAMEPADS ON'):
+                f.write('OK\n'); f.flush()
+            elif line.startswith('BIND GET'):
+                f.write('304\n'); f.flush()
+    def fake_inputd():
+        while True:
+            try:
+                conn, _ = isrv.accept()
+            except OSError:
+                return
+            threading.Thread(target=input_conn, args=(conn,), daemon=True).start()
+    threading.Thread(target=fake_inputd, daemon=True).start()
+    def remap_sent():
+        del input_lines[:]
+        psx_session(False)
+        return [l for l in input_lines if l.startswith('REMAP')]
+    gs = cmd('emud.sock', 'GAME_SETTINGS\t%s\tpsx' % psx)
+    check('controls: system pad listed', 'pad=menu_confirm:#1459,menu_back:#1460,' in gs and 'remap=\n' in gs)
+    check('controls: generic pad', 'pad=menu_back:A,menu_confirm:B,face_north:X,' in cmd('emud.sock', 'SYSTEM_SETTINGS\tcps2'))
+    check('controls: none by default', remap_sent() == ['REMAP'])
+    check('controls: bad values refused', cmd('emud.sock', 'SYSTEM_SET\tpsx\tremap_l1\tquick_menu').startswith('ERR')
+          and cmd('emud.sock', 'SYSTEM_SET\tpsx\tremap_x\tl1').startswith('ERR'))
+    check('controls: system set', cmd('emud.sock', 'SYSTEM_SET\tpsx\tremap_face_west\tmenu_confirm').startswith('OK')
+          and cmd('emud.sock', 'SYSTEM_SET\tpsx\tremap_l3\tnone').startswith('OK')
+          and open(sysdir + '/psx.conf').read() == 'remap_face_west=menu_confirm\nremap_l3=none\n')
+    gs = cmd('emud.sock', 'GAME_SETTINGS\t%s\tpsx' % psx)
+    check('controls: game lists the system', 'system_remap=face_west:menu_confirm,l3:none\n' in gs and 'remap=\n' in gs)
+    check('controls: game follows its system', remap_sent() == ['REMAP face_west:menu_confirm,l3:none'])
+    cmd('emud.sock', 'GAME_SET\t%s\tpsx\tremap_face_west\tface_west' % psx)
+    cmd('emud.sock', 'GAME_SET\t%s\tpsx\tremap_face_north\tmenu_back' % psx)
+    check('controls: game wins', remap_sent() == ['REMAP face_north:menu_back,face_west:face_west,l3:none'])
+    check('controls: system counts the game', 'games=1\n' in cmd('emud.sock', 'SYSTEM_SETTINGS\tpsx'))
+    check('controls: reset all', cmd('emud.sock', 'GAME_SET\t%s\tpsx\tremap\t' % psx).startswith('OK')
+          and remap_sent() == ['REMAP face_west:menu_confirm,l3:none'])
+    cmd('emud.sock', 'SYSTEM_RESET\tpsx')
+    isrv.close()
+    os.unlink(run + '/inputd.sock')
+
     check('reset', cmd('emud.sock', 'GAME_RESET\t' + game).startswith('OK'))
     check('reset removes file', not os.path.exists('%s/users/%s/appdata/nuubos-emulation/games/%s.conf' % (ud, user, game)))
     check('inherited again', 'core=snes9x\n' in cmd('emud.sock', 'GAME_SETTINGS\t%s\tsnes' % game))
