@@ -1,0 +1,48 @@
+From: nuubOS <dev@nuubos>
+Subject: [PATCH] openssl ext: ASN1_BIT_STRING accessors for OpenSSL 4
+
+OpenSSL 4 made ASN1_STRING (and so ASN1_BIT_STRING, a typedef of it)
+opaque: struct asn1_string_st's fields are no longer visible outside
+libcrypto. ossl_asn1.c poked ->flags/->length/->data directly to manage
+a bit string's "unused bits in the last byte" accounting, so the
+openssl extension failed to build ("invalid use of incomplete typedef
+'ASN1_BIT_STRING'"). OpenSSL 4 added ASN1_BIT_STRING_set1() and
+ASN1_BIT_STRING_get_length() for exactly this (data + unused-bits count
+in one call); use them instead of the raw struct fields and
+ASN1_STRING_FLAG_BITS_LEFT.
+---
+--- a/ext/openssl/ossl_asn1.c
++++ b/ext/openssl/ossl_asn1.c
+@@ -236,9 +236,8 @@
+     StringValue(obj);
+     if(!(bstr = ASN1_BIT_STRING_new()))
+         ossl_raise(eASN1Error, NULL);
+-    ASN1_BIT_STRING_set(bstr, (unsigned char *)RSTRING_PTR(obj), RSTRING_LENINT(obj));
+-    bstr->flags &= ~(ASN1_STRING_FLAG_BITS_LEFT|0x07); /* clear */
+-    bstr->flags |= ASN1_STRING_FLAG_BITS_LEFT | unused_bits;
++    ASN1_BIT_STRING_set1(bstr, (unsigned char *)RSTRING_PTR(obj),
++                         RSTRING_LENINT(obj), (int)unused_bits);
+
+     return bstr;
+ }
+@@ -372,11 +371,15 @@
+     p = der;
+     if(!(bstr = d2i_ASN1_BIT_STRING(NULL, &p, length)))
+         ossl_raise(eASN1Error, NULL);
+-    len = bstr->length;
+-    *unused_bits = 0;
+-    if(bstr->flags & ASN1_STRING_FLAG_BITS_LEFT)
+-        *unused_bits = bstr->flags & 0x07;
+-    ret = rb_str_new((const char *)bstr->data, len);
++    {
++        size_t len_sz;
++        int unused_bits_i = 0;
++
++        ASN1_BIT_STRING_get_length(bstr, &len_sz, &unused_bits_i);
++        len = (long)len_sz;
++        *unused_bits = unused_bits_i;
++    }
++    ret = rb_str_new((const char *)ASN1_STRING_get0_data(bstr), len);
+     ASN1_BIT_STRING_free(bstr);
+
+     return ret;
