@@ -51,6 +51,17 @@ fn one_of(s: &str, list: &[&str]) -> Result<String, String> {
     }
 }
 
+/* Game/System Settings keys: the settings, "remap" (Reset Controls) and
+ * remap_<control> (Controls). */
+fn settings_key(s: &str) -> Result<String, String> {
+    const CONTROLS: [&str; 16] = ["menu_confirm", "menu_back", "face_north", "face_west", "menu_up", "menu_down",
+        "menu_left", "menu_right", "l1", "r1", "l2", "r2", "l3", "r3", "settings", "select"];
+    if s.strip_prefix("remap_").is_some_and(|c| CONTROLS.contains(&c)) {
+        return Ok(s.to_owned());
+    }
+    one_of(s, &["core", "aspect", "filter", "accuracy", "pak", "resolution", "frameskip", "remap"])
+}
+
 fn flag(s: &str) -> Result<&'static str, String> {
     match s {
         "1" | "true" => Ok("1"),
@@ -257,6 +268,8 @@ pub fn topic(t: &str, q: &dyn Fn(&str) -> String) -> R {
         "search" => kv(&sock_timeout("libraryd", &format!("SEARCH\t{}", plain(&q("spec"), 512)?), Duration::from_secs(8))?),
         "details" => kv(&sock("libraryd", &format!("DETAILS\t{}", game_id(&q("id"))?))?),
         "game_settings" => kv(&sock("emud", &format!("GAME_SETTINGS\t{}\t{}", game_id(&q("id"))?, token(&q("system"))?))?),
+        /* System Settings (GitHub #12): what every game of a system inherits. */
+        "system_settings" => kv(&sock("emud", &format!("SYSTEM_SETTINGS\t{}", token(&q("system"))?))?),
         "files" => {
             let p = files::user_path(&q("path")).ok_or("path")?;
             kv(&tool_ok("nuubos-filesctl", &["list", &p])?)
@@ -347,6 +360,7 @@ pub fn action(b: &Value) -> R {
         "audio.system" => { sock_ok("audiod", &format!("SYSTEM VOLUME SET {}", int(&a("v"), 0, 100)?))?; done("audio") }
         "audio.apps" => { sock_ok("audiod", &format!("APPLICATIONS VOLUME SET {}", int(&a("v"), 0, 100)?))?; done("audio") }
         "audio.music" => { sock_ok("audiod", &format!("MUSIC VOLUME SET {}", int(&a("v"), 0, 100)?))?; done("audio") }
+        "audio.step" => { sock_ok("audiod", &format!("VOLUME STEP SET {}", one_of(&a("v"), &["1", "2", "5", "10"])?))?; done("audio") }
         "audio.musicon" => { sock_ok("audiod", &format!("MUSIC ENABLED SET {}", flag(&a("v"))?))?; done("audio") }
         "audio.nav" => { sock_ok("audiod", &format!("SYSTEM NAVIGATION SET {}", flag(&a("v"))?))?; done("audio") }
         "audio.notify" => { sock_ok("audiod", &format!("SYSTEM NOTIFY SET {}", flag(&a("v"))?))?; done("audio") }
@@ -505,10 +519,17 @@ pub fn action(b: &Value) -> R {
         "emu.quit" => { sock_ok("emud", "QUIT")?; ok() }
         "game.set" => {
             sock_ok("emud", &format!("GAME_SET\t{}\t{}\t{}\t{}", game_id(&a("id"))?, token(&a("system"))?,
-                one_of(&a("key"), &["core", "aspect", "filter", "accuracy", "pak", "resolution"])?, plain(&a("value"), 64)?))?;
+                settings_key(&a("key"))?, plain(&a("value"), 64)?))?;
             ok()
         }
         "game.reset" => { sock_ok("emud", &format!("GAME_RESET\t{}", game_id(&a("id"))?))?; ok() }
+        "system.set" => {
+            sock_ok("emud", &format!("SYSTEM_SET\t{}\t{}\t{}", token(&a("system"))?,
+                settings_key(&a("key"))?, plain(&a("value"), 64)?))?;
+            ok()
+        }
+        "system.reset" => { sock_ok("emud", &format!("SYSTEM_RESET\t{}", token(&a("system"))?))?; ok() }
+        "system.reset_games" => { sock_ok("emud", &format!("SYSTEM_RESET_GAMES\t{}", token(&a("system"))?))?; ok() }
 
         /* RetroAchievements and metadata. Passwords go on stdin. */
         "ra.login" => {
@@ -516,8 +537,9 @@ pub fn action(b: &Value) -> R {
             done("ra")
         }
         "ra.logout" => { tool_ok("nuubos-achievementsctl", &["logout", &user()?])?; done("ra") }
-        "ra.set" => { tool_ok("nuubos-achievementsctl", &["set", &user()?, &one_of(&a("key"), &["enabled", "hardcore"])?, flag(&a("v"))?])?; done("ra") }
+        "ra.set" => { tool_ok("nuubos-achievementsctl", &["set", &user()?, &one_of(&a("key"), &["enabled", "hardcore", "offline"])?, flag(&a("v"))?])?; done("ra") }
         "scraper.provider" => { tool_ok("nuubos-scraper", &["provider", "set", &one_of(&a("v"), &["screenscraper", "thegamesdb", "libretro"])?])?; done("scraper") }
+        "scraper.region" => { tool_ok("nuubos-scraper", &["region", "set", &one_of(&a("v"), &["auto", "us", "eu", "jp", "wor"])?])?; done("scraper") }
         "scraper.account" => {
             tool(&svc::bin("nuubos-scraper"), &["account", "set", &plain(a("name").trim(), 64)?], Some(&plain(&a("password"), 256)?))?;
             done("scraper")
@@ -549,6 +571,7 @@ pub fn action(b: &Value) -> R {
         /* Library (nuubos-libraryd). */
         "lib.scan" => { sock_ok("libraryd", "SCAN")?; ok() }
         "lib.unavailable" => { sock_ok("libraryd", &format!("SHOW_UNAVAILABLE\t{}", flag(&a("v"))?))?; ok() }
+        "lib.wrap" => { sock_ok("libraryd", &format!("WRAP_ROWS\t{}", flag(&a("v"))?))?; ok() }
         "lib.delete" => { sock_ok("libraryd", &format!("DELETE\t{}\tCONFIRM", game_id(&a("id"))?))?; ok() }
         "lib.statsreset" => { sock_ok("libraryd", &format!("STATS_RESET\t{}", game_id(&a("id"))?))?; ok() }
         "coll.create" => { sock_ok("libraryd", &format!("COLLECTION_CREATE\t{}", plain(a("name").trim(), 64)?))?; ok() }

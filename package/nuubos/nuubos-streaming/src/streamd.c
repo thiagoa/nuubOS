@@ -1334,10 +1334,17 @@ static void run_buttons(long long now)
 	button_next_ms = now + BUTTON_STEP_MS;
 }
 
+static void request_stream_quit(bool close_app);
+
 static void handle_hotkey(const char *action)
 {
-	/* Emulation chords (save state, slots...) mean nothing on a PC
-	 * stream; they are consumed by inputd and ignored here. */
+	/* Quit (H + Start) ends the stream like everywhere else; the other
+	 * emulation chords (save state, slots...) mean nothing on a PC
+	 * stream: consumed by inputd and ignored here. */
+	if (!strcmp(action, "quit")) {
+		request_stream_quit(false);
+		return;
+	}
 	log_msg("streamd: hotkey %s ignored", action);
 }
 

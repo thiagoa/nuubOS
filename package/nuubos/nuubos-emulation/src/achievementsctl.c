@@ -2,11 +2,16 @@
 /*
  * nuubos-achievementsctl — per-user RetroAchievements account (EPIC-017).
  *
- *   status USER                       user=, enabled=, hardcore= (never the token)
+ *   status USER                       user=, enabled=, hardcore=, offline= (never
+ *                                     the token)
  *   login USER NAME                   password on stdin (one line); stores only
  *                                     the API token returned by the service
  *   logout USER                       removes the local credentials
- *   set USER enabled|hardcore 0|1
+ *   set USER enabled|hardcore|offline 0|1
+ *
+ * offline (default 1, GitHub #18): casual achievements earned without a
+ * connection are kept and sent later (nuubos-emud runs RAOfflineProxy for
+ * casual sessions; Hardcore always talks to the server directly).
  *
  * USER is the nuubOS user id. Credentials live in STATE, readable by root
  * only: /state/users/<id>/secrets/retroachievements.conf. nuubos-emud gives
@@ -41,6 +46,7 @@ struct account {
 	char token[128];
 	bool enabled;
 	bool hardcore;
+	bool offline;
 };
 
 struct body {
@@ -83,6 +89,7 @@ static void load(const char *user, struct account *a)
 	FILE *fp;
 
 	memset(a, 0, sizeof(*a));
+	a->offline = true;
 	account_path(user, path, sizeof(path));
 	fp = fopen(path, "r");
 	if (!fp)
@@ -102,6 +109,8 @@ static void load(const char *user, struct account *a)
 			a->enabled = !strcmp(eq, "1");
 		else if (!strcmp(line, "HARDCORE"))
 			a->hardcore = !strcmp(eq, "1");
+		else if (!strcmp(line, "OFFLINE"))
+			a->offline = !strcmp(eq, "1");
 	}
 	fclose(fp);
 }
@@ -123,8 +132,8 @@ static int save(const char *user, const struct account *a)
 	fp = fopen(tmp, "w");
 	if (!fp)
 		return -1;
-	fprintf(fp, "USERNAME=%s\nTOKEN=%s\nENABLED=%d\nHARDCORE=%d\n",
-		a->username, a->token, a->enabled, a->hardcore);
+	fprintf(fp, "USERNAME=%s\nTOKEN=%s\nENABLED=%d\nHARDCORE=%d\nOFFLINE=%d\n",
+		a->username, a->token, a->enabled, a->hardcore, a->offline);
 	if (fflush(fp) != 0 || fsync(fileno(fp)) != 0)
 		rc = -1;
 	if (fclose(fp) != 0)
@@ -241,8 +250,8 @@ int main(int argc, char **argv)
 	}
 	if (!strcmp(argv[1], "status") && argc == 3) {
 		load(argv[2], &a);
-		printf("user=%s\nenabled=%d\nhardcore=%d\nend=1\n",
-		       a.token[0] ? a.username : "", a.token[0] && a.enabled, a.hardcore);
+		printf("user=%s\nenabled=%d\nhardcore=%d\noffline=%d\nend=1\n",
+		       a.token[0] ? a.username : "", a.token[0] && a.enabled, a.hardcore, a.offline);
 		return 0;
 	}
 	if (!strcmp(argv[1], "login") && argc == 4) {
@@ -272,6 +281,8 @@ int main(int argc, char **argv)
 			a.enabled = argv[4][0] == '1';
 		else if (!strcmp(argv[3], "hardcore"))
 			a.hardcore = argv[4][0] == '1';
+		else if (!strcmp(argv[3], "offline"))
+			a.offline = argv[4][0] == '1';
 		else {
 			puts("ERR key");
 			return 1;

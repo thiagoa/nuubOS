@@ -1,0 +1,50 @@
+From: nuubOS <nuubos@localhost>
+Subject: [PATCH] panfrost: keep a BO's CPU mapping while it is in the BO cache
+
+panfrost_bo_unreference() unmapped every BO before putting it in the
+cache, so each reuse of a cached BO paid an mmap, the page faults of
+touching it again and, at its next release, a munmap. Batch pool slabs
+are released and fetched again every frame: Flycast (Dead or Alive 2) on
+Mali-G31 spent ~11 % of its rendering thread in mmap, munmap and the
+faults. The mapping now stays until the BO is freed (cache eviction,
+including a BO the kernel purged while evictable: making it unevictable
+fails and it is freed).
+
+Signed-off-by: nuubOS
+---
+--- a/src/gallium/drivers/panfrost/pan_bo.c
++++ b/src/gallium/drivers/panfrost/pan_bo.c
+@@ -121,6 +121,8 @@
+    return NULL;
+ }
+ 
++static void panfrost_bo_munmap(struct panfrost_bo *bo);
++
+ static void
+ panfrost_bo_free(struct panfrost_bo *bo)
+ {
+@@ -128,6 +130,9 @@
+    struct pan_kmod_vm *vm = bo->dev->kmod.vm;
+    uint64_t gpu_va = bo->ptr.gpu;
+ 
++   /* A cached BO keeps its CPU mapping until it is freed. */
++   panfrost_bo_munmap(bo);
++
+    /* BO will be freed with the sparse array, but zero to indicate free */
+    memset(bo, 0, sizeof(*bo));
+ 
+@@ -458,9 +463,11 @@
+     * lock, let's make sure it's still not referenced before freeing it.
+     */
+    if (p_atomic_read(&bo->refcnt) == 0) {
+-      /* When the reference count goes to zero, we need to cleanup */
+-      panfrost_bo_munmap(bo);
+-
++      /* When the reference count goes to zero, we need to cleanup. The
++       * CPU mapping stays while the BO is in the cache (it is unmapped
++       * when the BO is freed, also when the kernel purged it meanwhile):
++       * unmapping on every release cost an mmap, page faults and a munmap
++       * at each reuse, e.g. every batch pool slab of every frame. */
+       if (dev->debug & (PAN_DBG_TRACE | PAN_DBG_SYNC))
+          pandecode_inject_free(dev->decode_ctx, bo->ptr.gpu,
+                                panfrost_bo_size(bo));

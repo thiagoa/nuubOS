@@ -371,7 +371,7 @@ async function searchResults(q) {
 page('library', 'manage', () => T('library'), async (path) => {
   const [what, arg] = path;
   if (what === 'game') return gamePage(arg, path[2]);
-  if (what === 'gamesettings') return gameSettingsPage(arg, path[2]);
+  if (what === 'gamesettings') return settingsPage(arg, path[2], path[3] === 'controls');
   if (what === 'system') return systemPage(arg);
   if (what === 'collection') return collectionPage(arg);
   const lib = await get('library');
@@ -496,6 +496,7 @@ async function gamePage(id, from) {
       on: () => act('lib.statsreset', { id }, { topics: ['details', 'library'] }) }),
     row({ key: 'del', title: C(544, 'Delete Game'), icon: 'trash-can', danger: true,
       detail: avail === '0' ? C(1318, 'Removes the game, its cover and details from the library for every user. Saves are kept.')
+        : d.folder === '1' ? C(1475, "Permanently deletes the game's folder and everything in it for every user. Saves are kept.")
         : C(545, 'Permanently deletes the game file for every user. Saves are kept.'),
       arm: { prompt: C(546, 'Press again to delete permanently') }, on: async () => {
         await act('lib.delete', { id }, { topics: ['library'] });
@@ -521,39 +522,111 @@ async function gamePage(id, from) {
   return { title: C(522, 'Game Details'), back: backTo, nodes, topics: ['library'], backdrop: cover ? img(cover, 96) : null };
 }
 
-async function gameSettingsPage(id, system) {
-  const s = await get('game_settings', { id, system }, true);
+/* Game Settings (id) or System Settings (id = null, GitHub #12): a key a
+ * game leaves unset follows its system, a system's the default. */
+async function settingsPage(id, system, controls) {
+  const sys = !id;
+  const [s, lib] = await Promise.all([sys ? get('system_settings', { system }, true) : get('game_settings', { id, system }, true), get('library')]);
+  const sysName = (rows(lib.system).find((x) => x[0] === system) || [])[1] || system;
   const def = (v) => C(528, 'Default ({0})', v);
+  const inh = (sv, label, fallback) => (sv ? C(1448, 'System ({0})', label) : def(fallback));
   const aspects = { core: C(529, 'As the game'), '4:3': '4:3', '16:9': '16:9', full: C(530, 'Full Screen'), integer: C(531, 'Integer Scaling'), square: C(1413, 'Square Pixels') };
   const filters = { sharp: C(532, 'Sharp'), smooth: C(533, 'Smooth'), pixel: C(534, 'Pixel Perfect'), crt: C(777, 'CRT Effect') };
   const accuracies = { fast: C(1315, 'Fast'), accurate: C(1316, 'Accurate') };
-  const paks = { '': C(1340, 'Rumble Pak'), memory: C(1341, 'Controller Pak') };
+  const paks = { rumble: C(1340, 'Rumble Pak'), memory: C(1341, 'Controller Pak') };
   const resolutions = { auto: C(52, 'Auto'), '1x': C(1379, '1x'), '2x': C(1380, '2x'), custom: C(315, 'Custom') };
+  const frameskips = { off: C(54, 'Off'), auto: C(52, 'Auto'), max: C(1465, 'Auto (up to 3)'), custom: C(315, 'Custom') };
   const cores = (s.cores || '').split(/[ ,]/).filter(Boolean);
-  const set = (key, value) => act('game.set', { id, system, key, value }, { topics: ['game_settings'] });
+  const topic = sys ? 'system_settings' : 'game_settings';
+  const set = (key, value) => (sys ? act('system.set', { system, key, value }, { topics: [topic] })
+    : act('game.set', { id, system, key, value }, { topics: [topic] }));
   const pick = async (key, title, options, cur) => { const v = await choose(title, options, cur); if (v !== null) await set(key, v); };
+  const coreInh = inh(s.system_core, s.system_core, s.core_default);
+  const aspectInh = inh(s.system_aspect, aspects[s.system_aspect], C(531, 'Integer Scaling'));
+  const filterInh = inh(s.system_filter, filters[s.system_filter], filters[s.filter_default] || '');
+  const accInh = inh(s.system_accuracy, accuracies[s.system_accuracy], accuracies[s.accuracy_default] || accuracies.fast);
+  const resInh = inh(s.system_resolution, resolutions[s.system_resolution], resolutions[s.resolution_default] || resolutions['1x']);
+  const skipInh = inh(s.system_frameskip, frameskips[s.system_frameskip], frameskips[s.frameskip_default] || frameskips.off);
+  const pakOptions = s.system_pak
+    ? [{ value: '', label: C(1448, 'System ({0})', paks[s.system_pak]) }, { value: 'rumble', label: paks.rumble }, { value: 'memory', label: paks.memory }]
+    : [{ value: '', label: paks.rumble }, { value: 'memory', label: paks.memory }];
+  const pakValue = s.pak ? paks[s.pak] : s.system_pak ? C(1448, 'System ({0})', paks[s.system_pak]) : paks.rumble;
+  /* Controls (user request 2026-10-29): what each control of the console
+   * presses on the system's pad; the D-pad is every system's. */
+  const here = sys ? 'gaming/systems/' + system : 'library/gamesettings/' + id + '/' + system;
+  const list = (v) => (v || '').split(',').filter((p) => p.includes(':')).map((p) => p.split(':'));
+  const pad = list(s.pad), own = list(s.remap), sysRemap = list(s.system_remap);
+  const DPAD = ['menu_up', 'menu_down', 'menu_left', 'menu_right'];
+  const padLabel = (t) => {
+    if (t === 'none') return C(173, 'None');
+    if (DPAD.includes(t)) return ['↑', '↓', '←', '→'][DPAD.indexOf(t)];
+    const x = pad.find((p) => p[0] === t);
+    return x && x[1].startsWith('#') ? C(+x[1].slice(1), '') : x && x[1] ? x[1] : controlName(t);
+  };
+  const padDefault = (c) => (DPAD.includes(c) || pad.some((p) => p[0] === c) ? padLabel(c) : C(173, 'None'));
+  const remapOf = (l, c) => (l.find((p) => p[0] === c) || [])[1] || '';
+  const remapInh = (c) => inh(remapOf(sysRemap, c), padLabel(remapOf(sysRemap, c)), padDefault(c));
+  if (controls) {
+    const targets = [...pad.map((p) => p[0]), ...DPAD, 'none'];
+    return {
+      title: C(1456, 'Controls'), kicker: sys ? sysName : C(524, 'Game Settings'), back: here, topics: [],
+      nodes: [group(
+        ...CONTROLS.map(([c]) => row({ key: 'ctl:' + c, title: controlName(c), chevron: true,
+          value: remapOf(own, c) ? padLabel(remapOf(own, c)) : remapInh(c),
+          on: () => pick('remap_' + c, controlName(c), [{ value: '', label: remapInh(c) },
+            ...targets.map((t) => ({ value: t, label: DPAD.includes(t) ? controlName(t) : padLabel(t) }))], remapOf(own, c)) })),
+        row({ key: 'ctl-reset', title: C(1458, 'Reset Controls'), detail: C(536, 'Changes apply the next time the game starts'), disabled: !own.length,
+          arm: { prompt: C(598, 'Press again to reset') }, on: () => set('remap', '') }))],
+    };
+  }
+  const controlsValue = own.length ? C(1463, 'Custom') : sysRemap.length ? C(1448, 'System ({0})', C(1463, 'Custom')) : '';
   return {
-    title: C(524, 'Game Settings'), back: 'library/game/' + id, topics: [],
+    title: sys ? sysName : C(524, 'Game Settings'), kicker: sys ? C(1454, 'System Settings') : '',
+    back: sys ? 'gaming/systems' : 'library/game/' + id, topics: [],
     nodes: [group(
-      row({ key: 'core', title: C(525, 'Emulator'), value: s.core_override || def(s.core_default), chevron: true, disabled: cores.length < 2,
-        on: () => pick('core', C(525, 'Emulator'), [{ value: '', label: def(s.core_default) }, ...cores.map((c) => ({ value: c, label: c }))], s.core_override) }),
-      row({ key: 'aspect', title: C(526, 'Aspect Ratio'), value: s.aspect ? aspects[s.aspect] || s.aspect : def(C(531, 'Integer Scaling')), chevron: true,
-        on: () => pick('aspect', C(526, 'Aspect Ratio'), [{ value: '', label: def(C(531, 'Integer Scaling')) }, ...Object.entries(aspects).map(([value, label]) => ({ value, label }))], s.aspect) }),
-      row({ key: 'filter', title: C(527, 'Video Filter'), value: s.filter ? filters[s.filter] : def(filters[s.filter_default] || ''), chevron: true,
-        on: () => pick('filter', C(527, 'Video Filter'), [{ value: '', label: def(filters[s.filter_default] || '') }, ...['sharp', 'smooth', 'pixel'].map((v) => ({ value: v, label: filters[v] }))], s.filter) }),
+      !sys && cores.length ? row({ key: 'sys', title: C(1452, '{0} Settings', sysName), detail: C(1453, 'Settings shared by every game of this system'),
+        chevron: true, on: () => go('gaming/systems/' + system) }) : null,
+      row({ key: 'core', title: C(525, 'Emulator'), value: s.core_override || coreInh, chevron: true, disabled: cores.length < 2,
+        on: () => pick('core', C(525, 'Emulator'), [{ value: '', label: coreInh }, ...cores.map((c) => ({ value: c, label: c }))], s.core_override) }),
+      row({ key: 'aspect', title: C(526, 'Aspect Ratio'), value: s.aspect ? aspects[s.aspect] || s.aspect : aspectInh, chevron: true,
+        on: () => pick('aspect', C(526, 'Aspect Ratio'), [{ value: '', label: aspectInh }, ...Object.entries(aspects).map(([value, label]) => ({ value, label }))], s.aspect) }),
+      row({ key: 'filter', title: C(527, 'Video Filter'), value: s.filter ? filters[s.filter] : filterInh, chevron: true,
+        on: () => pick('filter', C(527, 'Video Filter'), [{ value: '', label: filterInh }, ...['sharp', 'smooth', 'pixel'].map((v) => ({ value: v, label: filters[v] }))], s.filter) }),
       s.accuracy_supported === '1' ? row({ key: 'accuracy', title: C(1314, 'Emulation Accuracy'),
         detail: ['dreamcast', 'naomi', 'atomiswave'].includes(system) ? C(1383, 'Fast can draw smoke and glass wrong') : C(1317, 'Choose Accurate if the game misbehaves'),
-        value: s.accuracy ? accuracies[s.accuracy] : def(accuracies[s.accuracy_default] || accuracies.fast), chevron: true,
-        on: () => pick('accuracy', C(1314, 'Emulation Accuracy'), [{ value: '', label: def(accuracies[s.accuracy_default] || accuracies.fast) }, ...Object.entries(accuracies).map(([value, label]) => ({ value, label }))], s.accuracy) }) : null,
+        value: s.accuracy ? accuracies[s.accuracy] : accInh, chevron: true,
+        on: () => pick('accuracy', C(1314, 'Emulation Accuracy'), [{ value: '', label: accInh }, ...Object.entries(accuracies).map(([value, label]) => ({ value, label }))], s.accuracy) }) : null,
       s.pak_supported === '1' ? row({ key: 'pak', title: C(1339, 'Controller Accessory'), detail: C(1342, 'One fits at a time: choose Controller Pak if the game saves on it'),
-        value: s.pak === 'memory' ? paks.memory : paks[''], chevron: true,
-        on: () => pick('pak', C(1339, 'Controller Accessory'), Object.entries(paks).map(([value, label]) => ({ value, label })), s.pak || '') }) : null,
+        value: pakValue, chevron: true, on: () => pick('pak', C(1339, 'Controller Accessory'), pakOptions, s.pak || '') }) : null,
       s.resolution_supported === '1' ? row({ key: 'resolution', title: C(454, 'Resolution'),
         detail: s.resolution_default === 'auto' ? C(1381, 'Auto: 1x on the console, 2x on a TV') : C(1382, '2x is sharper but can slow the game down'),
-        value: s.resolution ? resolutions[s.resolution] : def(resolutions[s.resolution_default] || resolutions['1x']), chevron: true,
-        on: () => pick('resolution', C(454, 'Resolution'), [{ value: '', label: def(resolutions[s.resolution_default] || resolutions['1x']) }, { value: '1x', label: resolutions['1x'] }, { value: '2x', label: resolutions['2x'] }], s.resolution) }) : null,
-      row({ key: 'reset', title: C(535, 'Reset Game Settings'), detail: C(536, 'Changes apply the next time the game starts'),
-        arm: { prompt: C(598, 'Press again to reset') }, on: () => act('game.reset', { id }, { topics: ['game_settings'] }) }))],
+        value: s.resolution ? resolutions[s.resolution] : resInh, chevron: true,
+        on: () => pick('resolution', C(454, 'Resolution'), [{ value: '', label: resInh }, { value: '1x', label: resolutions['1x'] }, { value: '2x', label: resolutions['2x'] }], s.resolution) }) : null,
+      s.frameskip_supported === '1' ? row({ key: 'frameskip', title: C(1464, 'Frameskip'), detail: C(1466, 'Auto skips frames only when the game slows down'),
+        value: s.frameskip ? frameskips[s.frameskip] : skipInh, chevron: true,
+        on: () => pick('frameskip', C(1464, 'Frameskip'), [{ value: '', label: skipInh }, { value: 'off', label: frameskips.off }, { value: 'auto', label: frameskips.auto }, { value: 'max', label: frameskips.max }], s.frameskip || '') }) : null,
+      cores.length ? row({ key: 'controls', title: C(1456, 'Controls'), detail: C(1457, 'Choose what each button does in the game'),
+        value: controlsValue, chevron: true, on: () => go(here + '/controls') }) : null,
+      sys && +s.games > 0 ? row({ key: 'games', title: C(1450, 'Apply to All Games'), detail: C(1449, '{0} games use their own settings', s.games),
+        arm: { prompt: C(191, 'Press again to confirm') }, on: () => act('system.reset_games', { system }, { topics: [topic] }) }) : null,
+      sys ? row({ key: 'reset', title: C(1451, 'Reset System Settings'), detail: C(536, 'Changes apply the next time the game starts'),
+        arm: { prompt: C(598, 'Press again to reset') }, on: () => act('system.reset', { system }, { topics: [topic] }) })
+        : row({ key: 'reset', title: C(535, 'Reset Game Settings'), detail: C(536, 'Changes apply the next time the game starts'),
+          arm: { prompt: C(598, 'Press again to reset') }, on: () => act('game.reset', { id }, { topics: [topic] }) }))],
+  };
+}
+
+/* Gaming → System Settings: the systems with games and their emulator. */
+async function systemsPage() {
+  const lib = await get('library');
+  const list = (await Promise.all(rows(lib.system).map(async (x) => {
+    const s = await get('system_settings', { system: x[0] }, true).catch(() => ({}));
+    return (s.cores || '') ? { id: x[0], name: x[1], core: s.core } : null;
+  }))).filter(Boolean);
+  return {
+    title: C(1454, 'System Settings'), back: 'gaming', topics: ['library'],
+    nodes: [list.length ? group(...list.map((x) => row({ key: x.id, title: x.name, value: x.core, chevron: true, on: () => go('gaming/systems/' + x.id) })))
+      : empty(C(398, 'No games yet'), '')],
   };
 }
 
@@ -1308,6 +1381,7 @@ page('gaming', 'settings', () => C(702, 'Gaming'), async (path) => {
   if (path[0] === 'hotkeys') return hotkeysPage();
   if (path[0] === 'overlay') return overlayPage();
   if (path[0] === 'sync') return syncPage();
+  if (path[0] === 'systems') return path[1] ? settingsPage(null, path[1], path[2] === 'controls') : systemsPage();
   const [emu, ra, ss, lib, jobs, sync] = await Promise.all([get('emu_settings'), get('ra'), get('scraper'), get('library'), get('jobs'),
     get('sync').catch(() => ({}))]);
   const set = (key, value) => act('emu.set', { key, value }, { topics: ['emu_settings'] });
@@ -1316,6 +1390,7 @@ page('gaming', 'settings', () => C(702, 'Gaming'), async (path) => {
   const src = SOURCES[ss.provider] || SOURCES.screenscraper;
   const scanning = lib.scanning === '1';
   const positions = { top: C(1410, 'Top'), center: C(1411, 'Center'), bottom: C(1412, 'Bottom') };
+  const regions = { auto: C(122, 'Automatic'), us: C(1421, 'USA'), eu: C(1422, 'Europe'), jp: C(1423, 'Japan'), wor: C(1424, 'World') };
   const nodes = [section(C(703, 'GAMING'), 'user'), group(
     row({ key: 'ra', title: C(584, 'RetroAchievements'), value: ra.user || C(566, 'Not signed in'), chevron: true, on: () => go('gaming/ra') }),
     row({ key: 'boot', title: C(767, 'Console Boot Screens'), detail: C(768, "Shows the console's start-up logo when its BIOS is available"), toggle: on01(emu.boot_screens), set: (v) => set('boot_screens', v ? '1' : '0') }),
@@ -1333,14 +1408,21 @@ page('gaming', 'settings', () => C(702, 'Gaming'), async (path) => {
       } }),
     row({ key: 'bez', title: C(775, 'Bezels'), detail: C(776, 'Frames the game when it does not fill the screen'), toggle: on01(emu.bezels), set: (v) => set('bezels', v ? '1' : '0') }),
     row({ key: 'crt', title: C(777, 'CRT Effect'), detail: C(778, 'Scanlines for consoles played on TVs'), toggle: on01(emu.crt), set: (v) => set('crt', v ? '1' : '0') }),
-    row({ key: 'ramenu', title: C(1391, 'RetroArch in the Quick Menu'), detail: C(1392, "Opens RetroArch's own menu during a game"), toggle: on01(emu.retroarch_menu), set: (v) => set('retroarch_menu', v ? '1' : '0') })),
+    row({ key: 'ramenu', title: C(1391, 'RetroArch in the Quick Menu'), detail: C(1392, "Opens RetroArch's own menu during a game"), toggle: on01(emu.retroarch_menu), set: (v) => set('retroarch_menu', v ? '1' : '0') }),
+    row({ key: 'systems', title: C(1454, 'System Settings'), detail: C(1455, 'Emulator and picture for all the games of a system'), chevron: true, on: () => go('gaming/systems') })),
   section(C(704, 'LIBRARY'), 'device'), group(
     row({ key: 'scan', title: C(804, 'Scan for New Games'), detail: C(805, 'Finds games copied to the SD card since the last scan'), busy: scanning,
       value: scanning ? C(410, 'Searching for games…') : '', disabled: scanning, on: () => act('lib.scan') }),
     row({ key: 'unav', title: C(1319, 'Show Unavailable Games'), detail: C(1320, 'Games whose file is missing or on an SD2 card that is not inserted'),
       toggle: on01(lib.show_unavailable), set: (v) => act('lib.unavailable', { v }, { topics: ['library'] }) }),
+    row({ key: 'wrap', title: C(1467, 'Wrap Around Rows'), detail: C(1468, 'On Home, going past the last item returns to the first'),
+      toggle: on01(lib.wrap_rows), set: (v) => act('lib.wrap', { v }, { topics: ['library'] }) }),
     row({ key: 'src', title: C(792, 'Metadata Source'), value: src[0], detail: C(src[1], SOURCE_DETAILS[src[1]]), chevron: true,
       on: () => pickAndAct(C(792, 'Metadata Source'), Object.entries(SOURCES).map(([value, s]) => ({ value, label: s[0], detail: C(s[1], SOURCE_DETAILS[s[1]]) })), ss.provider, 'scraper.provider') }),
+    /* Cover Region (GitHub #10); TheGamesDB has one cover a game. */
+    ss.provider !== 'thegamesdb' ? row({ key: 'region', title: C(1419, 'Cover Region'), value: regions[ss.region] || regions.auto, chevron: true,
+      detail: C(1420, 'Box art from this region when there is one. Fill Missing Data changes the covers already downloaded.'),
+      on: () => pickAndAct(C(1419, 'Cover Region'), Object.entries(regions).map(([value, label]) => ({ value, label })), ss.region || 'auto', 'scraper.region') }) : null,
     ss.provider === 'screenscraper' || !ss.provider ? (ss.user
       ? row({ key: 'ssout', title: C(565, 'ScreenScraper Account'), value: ss.user, detail: C(567, 'Sign Out'), arm: { prompt: C(191, 'Press again to confirm') }, on: () => act('scraper.signout') })
       : row({ key: 'ssin', title: C(565, 'ScreenScraper Account'), value: C(566, 'Not signed in'), detail: C(803, 'Optional: more requests per day'), on: async () => {
@@ -1380,6 +1462,10 @@ async function raPage() {
           if (v && !(await form(C(907, 'Turn On Hardcore Mode?'), [], { text: C(908, 'Achievements are earned as on the original console, with no help. While Hardcore Mode is on, save states and fast-forward are off: every game starts from the beginning and only the game\'s own saves are kept. RetroArch also blocks cheats, rewind and slow motion. You can turn it off at any time.'), ok: C(909, 'Turn On') }))) return;
           await act('ra.set', { key: 'hardcore', v });
         } }),
+        /* Offline Achievements (RAOfflineProxy): casual sessions only. */
+        row({ key: 'off', title: C(1445, 'Offline Achievements'),
+          detail: on01(ra.hardcore) ? C(1447, 'Casual only: off in Hardcore Mode') : C(1446, 'Sent when you are back online'),
+          toggle: ra.offline !== '0' && !on01(ra.hardcore), disabled: on01(ra.hardcore), set: (v) => act('ra.set', { key: 'offline', v }) }),
         row({ key: 'out', title: C(567, 'Sign Out'), arm: { prompt: C(191, 'Press again to confirm') }, on: () => act('ra.logout') })]
       : row({ key: 'in', title: C(587, 'Sign In'), detail: C(591, 'Your password is used once and never stored'), on: async () => {
         const v = await form(C(584, 'RetroAchievements'), [{ name: 'name', label: C(285, 'Username') }, { name: 'password', label: C(172, 'Password'), type: 'password' }], { text: C(591, 'Your password is used once and never stored'), ok: C(587, 'Sign In') });
@@ -1439,6 +1525,9 @@ page('display', 'settings', () => C(7, 'Display & Audio'), async () => {
     } }),
     vol === 'unsupported' ? row({ key: 'vol', title: C(134, 'Volume'), value: a.selected === 'hdmi' ? C(223, 'TV / Receiver') : C(205, 'Unavailable'), detail: C(273, 'Volume controlled by TV / receiver'), disabled: true })
       : row({ key: 'vol', title: C(134, 'Volume'), slider: { value: Number(vol) || 0, set: (v) => act('audio.volume', { v }, { quiet: true }) } }),
+    /* Volume Button Step (GitHub #6): percent per Vol+/Vol- press. */
+    row({ key: 'vstep', title: C(1418, 'Volume Button Step'), value: (a['volume.step'] || '1') + '%', chevron: true,
+      on: () => pickAndAct(C(1418, 'Volume Button Step'), ['1', '2', '5', '10'].map((v) => ({ value: v, label: v + '%' })), a['volume.step'] || '1', 'audio.step') }),
     row({ key: 'apps', title: C(135, 'Applications'), slider: { value: Number(a['volume.applications']) || 0, set: (v) => act('audio.apps', { v }, { quiet: true }) } }),
     /* Home Music On/Off (user request 2026-10-28), then its volume. */
     row({ key: 'musicon', title: C(139, 'Home Music'), toggle: a['home_music.enabled'] !== '0', set: (v) => act('audio.musicon', { v }) }),

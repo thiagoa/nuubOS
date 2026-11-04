@@ -10,8 +10,13 @@
  * resolution such as PS1 enhancement, 480i/576i) get one beam per 2 rows
  * (3 above 576) while the colour keeps every row. Below 2x vertical scale
  * of those beam lines there is no room for scanlines and only the
- * horizontal blend is applied. Single pass, two texture fetches:
- * negligible on Mali-G31.
+ * horizontal blend is applied. Single pass, two texture fetches.
+ *
+ * Mali-G31 (one shader core): this pass is most of the GPU time of a 2D
+ * game (SNES/PS1 at 720x720: 16 % of the GPU without it, 39 % with it).
+ * Everything that is the same for the whole frame is worked out once per
+ * vertex, and the colour and beam maths run at mediump (16 bit, twice the
+ * rate on Bifrost); texel coordinates stay highp (up to 1024 texels).
  */
 
 #pragma parameter CRT_SCANLINES "Scanline strength" 0.25 0.0 1.0 0.05
@@ -27,16 +32,54 @@
 #define COMPAT_ATTRIBUTE attribute
 #endif
 
+#ifdef GL_ES
+precision highp float;
+#endif
+
 COMPAT_ATTRIBUTE vec4 VertexCoord;
 COMPAT_ATTRIBUTE vec4 TexCoord;
-COMPAT_VARYING vec2 vTexCoord;
+COMPAT_VARYING vec2 vTexel;
+/* Per frame: 1 / beam rows per line, output rows per beam line, its
+ * reciprocal, 1 = whole scale. */
+COMPAT_VARYING vec4 vScale;
+/* Per frame: beam centre, scanline strength, light gain. */
+COMPAT_VARYING vec3 vBeam;
 
 uniform mat4 MVPMatrix;
+uniform vec2 OutputSize;
+uniform vec2 TextureSize;
+uniform vec2 InputSize;
+
+#ifdef PARAMETER_UNIFORM
+uniform float CRT_SCANLINES;
+#else
+#define CRT_SCANLINES 0.25
+#endif
 
 void main()
 {
     gl_Position = MVPMatrix * VertexCoord;
-    vTexCoord = TexCoord.xy;
+    vTexel = TexCoord.xy * TextureSize;
+    /* Source rows per beam line: 1 up to 288 lines, 2 up to 576, ... (PS1
+     * at 2x internal resolution lost its scanlines, user report
+     * 2026-10-18). */
+    float k = floor((InputSize.y - 1.0) / 288.0) + 1.0;
+    float s = OutputSize.y * k / InputSize.y;
+    /* A fractional vertical scale (4:3 on a square screen) gives lines 2
+     * or 3 rows: sample the pixel's own position. */
+    float whole = abs(s - floor(s + 0.5)) < 0.01 ? 1.0 : 0.0;
+    /* Light scanlines everywhere (user request 2026-10-11: 0.55 read as
+     * dark lines, on N64 and on fractional scales most). 1.99: at exactly
+     * 2x (480 source rows on 480 lines, HDMI) the GPU's s could come out a
+     * hair below 2.0 and the scanlines vanished. */
+    float strength = s >= 1.99 ? CRT_SCANLINES : 0.0;
+    vScale = vec4(1.0 / k, s, 1.0 / s, whole);
+    /* Beam: centred half an output row above the pixel centre, so at 2x
+     * the first row is the beam and the second the gap. Gain back the
+     * light the gaps take: at 2x a gap row keeps ~0.5, so mid tones
+     * average the original brightness (user report 2026-10-09: the CRT
+     * look darkened the picture; was 0.30). */
+    vBeam = vec3(whole > 0.5 ? 0.5 - 0.5 / s : 0.5, strength, 1.0 + 0.55 * strength);
 }
 
 #elif defined(FRAGMENT)
@@ -59,63 +102,42 @@ out vec4 FragColor;
 #define COMPAT_TEXTURE texture2D
 #endif
 
-uniform vec2 OutputSize;
 uniform vec2 TextureSize;
-uniform vec2 InputSize;
 uniform sampler2D Texture;
-COMPAT_VARYING vec2 vTexCoord;
+COMPAT_VARYING vec2 vTexel;
+COMPAT_VARYING vec4 vScale;
+COMPAT_VARYING vec3 vBeam;
 
 #ifdef PARAMETER_UNIFORM
-uniform float CRT_SCANLINES;
 uniform float CRT_BLEND;
 #else
-#define CRT_SCANLINES 0.25
 #define CRT_BLEND 0.30
 #endif
 
 void main()
 {
-    vec2 texel = vTexCoord * TextureSize;
-    /* Source rows per beam line: 1 up to 288 lines, 2 up to 576, ... (PS1
-     * at 2x internal resolution lost its scanlines, user report
-     * 2026-10-18). */
-    float k = floor((InputSize.y - 1.0) / 288.0) + 1.0;
-    float s = OutputSize.y * k / InputSize.y;
-    /* A fractional vertical scale (4:3 on a square screen) gives lines 2
-     * or 3 rows: sample the pixel's own position. */
-    bool whole = abs(s - floor(s + 0.5)) < 0.01;
-    vec2 base = floor(texel);
-    vec2 f = texel - base;
-    float fl = fract(texel.y / k);
+    vec2 base = floor(vTexel);
+    vec2 f = vTexel - base;
+    vec2 inv = 1.0 / TextureSize;
+    mediump float fl = fract(vTexel.y * vScale.x);
 
     /* Horizontal melt: towards the neighbour on the near side, only in the
      * outer CRT_BLEND of the pixel, at most half way. */
-    float tx = f.x - 0.5;
+    mediump float tx = f.x - 0.5;
     float side = tx < 0.0 ? -1.0 : 1.0;
-    float melt = 0.5 * smoothstep(0.5 - CRT_BLEND, 0.5, abs(tx));
-    vec3 c0 = COMPAT_TEXTURE(Texture, (base + 0.5) / TextureSize).rgb;
-    vec3 c1 = COMPAT_TEXTURE(Texture, (base + vec2(side, 0.0) + 0.5) / TextureSize).rgb;
-    vec3 col = mix(c0, c1, melt);
+    mediump float melt = 0.5 * smoothstep(0.5 - CRT_BLEND, 0.5, abs(tx));
+    mediump vec3 c0 = COMPAT_TEXTURE(Texture, (base + 0.5) * inv).rgb;
+    mediump vec3 c1 = COMPAT_TEXTURE(Texture, (base + vec2(side + 0.5, 0.5)) * inv).rgb;
+    mediump vec3 col = mix(c0, c1, melt);
 
-    /* Beam: centred half an output row above the pixel centre, so at 2x
-     * the first row is the beam and the second the gap. */
-    float centre = whole ? 0.5 - 0.5 / s : 0.5;
-    float row = whole ? (floor(fl * s) + 0.5) / s : fl;
-    float dy = row - centre;
-    float lum = dot(col, vec3(0.299, 0.587, 0.114));
-    float width = mix(0.20, 0.34, lum);
-    float beam = exp(-(dy * dy) / (2.0 * width * width));
-    /* Light scanlines everywhere (user request 2026-10-11: 0.55 read as
-     * dark lines, on N64 and on fractional scales most). */
-    /* 1.99: at exactly 2x (480 source rows on 480 lines, HDMI) the GPU's s
-     * could come out a hair below 2.0 and the scanlines vanished. */
-    float strength = s >= 1.99 ? CRT_SCANLINES : 0.0;
-    float scan = 1.0 - strength * (1.0 - beam);
+    mediump float row = vScale.w > 0.5 ? (floor(fl * vScale.y) + 0.5) * vScale.z : fl;
+    mediump float dy = row - vBeam.x;
+    mediump float lum = dot(col, vec3(0.299, 0.587, 0.114));
+    mediump float width = mix(0.20, 0.34, lum);
+    mediump float beam = exp(-(dy * dy) / (2.0 * width * width));
+    mediump float scan = 1.0 - vBeam.y * (1.0 - beam);
 
-    /* Gain back the light the gaps take: at 2x a gap row keeps ~0.5, so
-     * mid tones average the original brightness (user report 2026-10-09:
-     * the CRT look darkened the picture; was 0.30). Whites clip. */
-    col *= scan * (1.0 + 0.55 * strength);
+    col *= scan * vBeam.z;
     FragColor = vec4(min(col, vec3(1.0)), 1.0);
 }
 

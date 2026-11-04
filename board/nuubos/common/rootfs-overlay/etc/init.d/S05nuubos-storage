@@ -61,6 +61,9 @@ ensure_tf1_view()
     mkdir -p "$TF1_VIEW"
 
     mount --bind /userdata "$TF1_VIEW" || return 1
+    # SD1 itself: the Data on SD2 folders bound over /userdata never show
+    # here (nuubos-storagectl moves through this view).
+    mount --make-private "$TF1_VIEW" 2>/dev/null
 
     [ "$(mounted_source "$TF1_VIEW")" = "$TF1" ]
 }
@@ -183,16 +186,31 @@ publish_user_view()
     #
     nuubos_userdata_prepare_users /userdata || return 1
 
+    #
+    # Data on SD2: every profile's folders bound to the card (or covered
+    # while it is away) before anything uses them.
+    #
+    /usr/sbin/nuubos-storagectl data apply >/dev/null 2>&1
+
     USER_ROOT="/userdata/users/$ACTIVE_USER_ID"
 
     [ -d "$USER_ROOT" ] || return 1
 
     mkdir -p /run/nuubos "$USERDATA_USER_VIEW" || return 1
 
-    mount --bind \
+    #
+    # The view carries the Data on SD2 folders (rbind) and follows them
+    # when the card comes and goes (a slave of the shared /userdata; its
+    # own unmount never reaches back).
+    #
+    mount --make-shared /userdata 2>/dev/null
+
+    mount --rbind \
         "$USER_ROOT" \
         "$USERDATA_USER_VIEW" ||
         return 1
+
+    mount --make-rslave "$USERDATA_USER_VIEW" 2>/dev/null
 
     awk -v m="$USERDATA_USER_VIEW" '
         $2 == m {

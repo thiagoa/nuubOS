@@ -26,7 +26,14 @@ start_service()
 stop_service()
 {
     if syncd_running; then
-        kill -TERM "$(cat "$PIDFILE" 2>/dev/null)" 2>/dev/null || true
+        kill -TERM "$PID" 2>/dev/null || true
+        # Until it is gone (it stops Syncthing first): an old syncd
+        # still exiting removed the socket of the new one on restart.
+        I=0
+        while [ -d "/proc/$PID" ] && [ "$I" -lt 100 ]; do
+            sleep 0.1
+            I=$((I + 1))
+        done
     fi
     rm -f "$PIDFILE" "$SOCKET" "$GUI_SOCKET"
     return 0
