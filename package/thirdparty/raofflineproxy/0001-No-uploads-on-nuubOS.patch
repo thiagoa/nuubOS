@@ -1,0 +1,31 @@
+From: nuubOS <noreply@nuubos>
+Subject: [PATCH] No uploads on nuubOS
+
+The storage-corruption log upload (automatic, no consent asked) and
+the usage report endpoint are removed: nothing leaves the console on its
+own. The proxy itself only talks to retroachievements.org.
+---
+diff -ru a/linux/raofflineproxy/log_uploader.py b/linux/raofflineproxy/log_uploader.py
+--- a/linux/raofflineproxy/log_uploader.py
++++ b/linux/raofflineproxy/log_uploader.py
+@@ -360,6 +360,8 @@
+ 
+ 
+ def upload_logs(extra_files: dict[str, str] | None = None) -> str:
++    # nuubOS: nothing leaves the console on its own (not even redacted logs).
++    raise RuntimeError("Log upload is disabled on nuubOS")
+     files = _read_redacted_log_files()
+     if extra_files:
+         files.update(extra_files)
+diff -ru a/linux/raofflineproxy/usage_report.py b/linux/raofflineproxy/usage_report.py
+--- a/linux/raofflineproxy/usage_report.py
++++ b/linux/raofflineproxy/usage_report.py
+@@ -36,6 +36,8 @@
+ 
+ 
+ def report_url(config_data: Optional[dict] = None) -> str:
++    # nuubOS: no usage reports.
++    return ""
+     from_env = os.environ.get(REPORT_URL_ENV)
+     if from_env is not None:
+         return from_env

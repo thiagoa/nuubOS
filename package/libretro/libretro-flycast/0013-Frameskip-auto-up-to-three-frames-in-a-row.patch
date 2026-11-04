@@ -1,0 +1,99 @@
+From: nuubOS <nuubos@localhost>
+Date: Thu, 29 Oct 2026 22:00:00 +0100
+Subject: [PATCH] Frameskip auto up to three frames in a row (nuubOS)
+
+reicast_frame_skipping gets auto_max, "Auto (up to 3)": the same rule as
+auto (a frame is neither read nor drawn while RetroArch's audio buffer
+runs low), up to three frames in a row instead of one (GitHub #23, same
+as melonDS-nuubOS). Auto is unchanged.
+
+Upstream: not submitted (nuubOS H700 tuning).
+---
+ core/libretro/libretro.cpp            | 24 +++++++++++++-----------
+ core/libretro/libretro_core_options.h |  3 ++-
+ 2 files changed, 15 insertions(+), 12 deletions(-)
+
+diff --git a/core/libretro/libretro.cpp b/core/libretro/libretro.cpp
+--- a/core/libretro/libretro.cpp
++++ b/core/libretro/libretro.cpp
+@@ -544,19 +544,20 @@ static void set_variable_visibility(void)
+    }
+ }
+ 
+-/* Automatic frameskip (threaded rendering): a frame is not drawn, never two
+- * in a row, while RetroArch's audio buffer is below FRAMESKIP_THRESHOLD %
+- * or about to underrun, that is while the emulation falls behind. The
+- * machine still runs every frame: the game keeps its speed and its sound,
+- * the libretro thread and the GPU skip a frame's reading and drawing.
+- * Same rule as melonDS-nuubOS. */
++/* Automatic frameskip (threaded rendering): a frame is not drawn, at most
++ * frameskip_max in a row (auto 1, auto_max 3), while RetroArch's audio
++ * buffer is below FRAMESKIP_THRESHOLD % or about to underrun, that is while
++ * the emulation falls behind. The machine still runs every frame: the game
++ * keeps its speed and its sound, the libretro thread and the GPU skip a
++ * frame's reading and drawing. Same rule as melonDS-nuubOS. */
+ #define FRAMESKIP_THRESHOLD 33
+ static bool frameskip_auto;
++static unsigned frameskip_max = 1;
+ static bool frameskip_cb_set;
+ static bool audio_buffer_active;
+ static unsigned audio_buffer_occupancy;
+ static bool audio_underrun_likely;
+-static bool frame_skipped;
++static unsigned frame_skipped;
+ 
+ static void audio_buffer_status(bool active, unsigned occupancy, bool underrun_likely)
+ {
+@@ -584,10 +585,10 @@ static void update_frameskip(bool enable)
+ bool rend_skip_frame(void)
+ {
+    bool skip = frameskip_auto && frameskip_cb_set && audio_buffer_active
+-         && !frame_skipped
++         && frame_skipped < frameskip_max
+          && (audio_underrun_likely || audio_buffer_occupancy < FRAMESKIP_THRESHOLD);
+ 
+-   frame_skipped = skip;
++   frame_skipped = skip ? frame_skipped + 1 : 0;
+    return skip;
+ }
+ 
+@@ -984,10 +985,11 @@ static void update_variables(bool first_startup)
+    {
+ 	   if (!strcmp("disabled", var.value))
+ 		   settings.pvr.ta_skip = 0;
+-	   else if (!strcmp("auto", var.value))
++	   else if (!strncmp("auto", var.value, 4))
+ 	   {
+ 		   settings.pvr.ta_skip = 0;
+ 		   frameskip_auto = true;
++		   frameskip_max = !strcmp("auto_max", var.value) ? 3 : 1;
+ 	   }
+ 	   else {
+ 		   settings.pvr.ta_skip = std::max(0, std::min(6, var.value[0] - '0'));
+@@ -2243,7 +2245,7 @@ void retro_unload_game(void)
+ {
+ 	INFO_LOG(COMMON, "Flycast unloading game");
+    update_frameskip(false);
+-   frame_skipped = false;
++   frame_skipped = 0;
+    if (game_data)
+       free(game_data);
+    game_data = NULL;
+diff --git a/core/libretro/libretro_core_options.h b/core/libretro/libretro_core_options.h
+--- a/core/libretro/libretro_core_options.h
++++ b/core/libretro/libretro_core_options.h
+@@ -555,12 +555,13 @@ struct retro_core_option_v2_definition option_defs_us[] = {
+       CORE_OPTION_NAME "_frame_skipping",
+       "Frame Skipping",
+       NULL,
+-      "Sets the number of frames to skip between each displayed frame. Auto skips drawing a frame, never two in a row, while the frontend's audio buffer runs low: the game keeps its full speed.",
++      "Sets the number of frames to skip between each displayed frame. Auto skips drawing a frame, never two in a row, while the frontend's audio buffer runs low: the game keeps its full speed. Auto (up to 3) skips up to three frames in a row.",
+       NULL,
+       "video",
+       {
+          { "disabled",  NULL },
+          { "auto",      "Auto" },
++         { "auto_max",  "Auto (up to 3)" },
+          { "1",         NULL },
+          { "2",         NULL },
+          { "3",         NULL },

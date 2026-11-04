@@ -254,7 +254,10 @@ static bool save_entries(const char *user, const char *name, const struct entry 
 		return false;
 	for (size_t i = 0; i < n; i++)
 		fprintf(fp, "%s\t%s\n", e[i].url, e[i].title);
-	if (fclose(fp) != 0 || rename(tmp, path) != 0) {
+	/* fsync: /userdata is exFAT, an unsynced file renamed into place comes
+	 * back empty after a crash. */
+	if (fflush(fp) != 0 || fsync(fileno(fp)) != 0 || fclose(fp) != 0 ||
+	    rename(tmp, path) != 0) {
 		unlink(tmp);
 		return false;
 	}
@@ -589,7 +592,9 @@ static void process_out(void)
 		s.in_used = 0;
 }
 
-/* HOTKEY lines from inputd (zoom controls). */
+static void quit_session(void);
+
+/* HOTKEY lines from inputd (zoom controls; quit = H + Start). */
 static void process_input(void)
 {
 	ssize_t n = read(s.input, s.inbuf + s.inbuf_used, sizeof(s.inbuf) - s.inbuf_used - 1);
@@ -613,6 +618,8 @@ static void process_input(void)
 				(void)cogctl("zoom-out", NULL);
 			else if (!strcmp(s.inbuf, "HOTKEY zoom_reset"))
 				(void)cogctl("zoom-reset", NULL);
+			else if (!strcmp(s.inbuf, "HOTKEY quit"))
+				quit_session();
 		}
 		memmove(s.inbuf, nl + 1, s.inbuf_used - (size_t)(nl + 1 - s.inbuf) + 1);
 		s.inbuf_used -= (size_t)(nl + 1 - s.inbuf);
