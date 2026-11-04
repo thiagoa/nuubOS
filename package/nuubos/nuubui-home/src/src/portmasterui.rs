@@ -13,7 +13,10 @@
  * installed → Open, Update / Check for Updates, Automatic Updates (portsd
  * installs a newer release when the page checks), Restore Version (the
  * release before the last update, when kept), Remove (second press; the
- * ports stay).
+ * ports stay). Ports on SD2 (GitHub #21, boards with a card slot, also
+ * before the download): portsd moves the ports and PortMaster to the SD2
+ * card's ports folder (off: back to the console's card) as a job with
+ * progress, A cancels; a port already at the destination keeps that copy.
  */
 
 use crate::{
@@ -48,6 +51,12 @@ pub struct Snapshot {
     pub error: String,
     pub previous: String,
     pub auto_update: bool,
+    /* Ports on SD2: chosen, the folder there (card in), a card slot. */
+    pub on_sd2: bool,
+    pub ready: bool,
+    pub sd2_slot: bool,
+    /* Ports the last move left on the other card (-1: no move yet). */
+    pub conflicts: i32,
 }
 
 pub static SNAPSHOT: Mutex<Option<Snapshot>> = Mutex::new(None);
@@ -65,6 +74,10 @@ pub fn parse(block: &str) -> Snapshot {
             "portmaster_error" => s.error = value.to_owned(),
             "portmaster_previous" => s.previous = value.to_owned(),
             "portmaster_auto_update" => s.auto_update = value == "1",
+            "ports_location" => s.on_sd2 = value == "sd2",
+            "ports_ready" => s.ready = value == "1",
+            "ports_sd2_slot" => s.sd2_slot = value == "1",
+            "ports_conflicts" => s.conflicts = value.parse().unwrap_or(-1),
             _ => {}
         }
     }
@@ -81,19 +94,30 @@ fn update_available(s: &Snapshot) -> bool {
     !s.latest.is_empty() && compare_versions(&s.latest, &s.version) == CmpOrdering::Greater
 }
 
-/* Actions of the installed application, in page order. */
-fn installed_actions(s: &Snapshot) -> Vec<&'static str> {
-    let mut keys = vec!["open", "update", "auto"];
-    if !s.previous.is_empty() {
-        keys.push("restore");
+/* Actions of the page, in page order. */
+fn page_actions(s: &Snapshot) -> Vec<&'static str> {
+    let mut keys = match page_state(s) {
+        "installing" | "moving" => return vec!["cancel"],
+        "installed" => vec!["open", "update", "auto"],
+        _ => vec!["download"],
+    };
+    if s.sd2_slot {
+        keys.push("location");
     }
-    keys.push("remove");
+    if page_state(s) == "installed" {
+        if !s.previous.is_empty() {
+            keys.push("restore");
+        }
+        keys.push("remove");
+    }
     keys
 }
 
 fn page_state(s: &Snapshot) -> &'static str {
     if s.job == "installing" {
         "installing"
+    } else if s.job == "moving" {
+        "moving"
     } else if s.installed {
         "installed"
     } else {
@@ -102,10 +126,29 @@ fn page_state(s: &Snapshot) -> &'static str {
 }
 
 fn row_count(s: &Snapshot) -> i32 {
-    if page_state(s) == "installed" {
-        installed_actions(s).len() as i32
+    page_actions(s).len() as i32
+}
+
+/* The Ports on SD2 switch and its caption. */
+fn location_action(ui: &HomeWindow, s: &Snapshot, actions: &mut Vec<DetailAction>, captions: &mut Vec<SharedString>) {
+    let mut sd2 = action(27, tr(ui, 1430, "Ports on SD2"), false);
+    sd2.on = s.on_sd2;
+    actions.push(sd2);
+    captions.push(if s.conflicts > 0 {
+        tr_arg(ui, 1433, "{0} ports were already there: their copies stayed on the other card", &s.conflicts.to_string()).into()
     } else {
-        1
+        tr(ui, 1431, "PortMaster and the ports in the ports folder of the SD2 card. The ports of the other card stay there.").into()
+    });
+}
+
+/* A failed move (or download) as a warning chip. */
+fn error_text(ui: &HomeWindow, error: &str) -> String {
+    match error {
+        "" => String::new(),
+        "space" => tr(ui, 493, "Not enough free space"),
+        "network" => tr(ui, 494, "Check the network connection"),
+        "write" => tr(ui, 1434, "The ports could not be moved"),
+        _ => tr(ui, 1361, "PortMaster could not be downloaded"),
     }
 }
 
@@ -169,6 +212,13 @@ pub fn refresh(ui: &HomeWindow) {
             actions.push(action(7, tr(ui, 482, "Press to cancel"), true));
             captions.push(SharedString::new());
         }
+        "moving" => {
+            let percent = s.progress.max(0);
+            progress = percent as f32 / 100.0;
+            progress_label = format!("{} • {}%", tr(ui, 1432, "Moving ports"), percent);
+            actions.push(action(7, tr(ui, 482, "Press to cancel"), true));
+            captions.push(SharedString::new());
+        }
         "installed" => {
             let version = format!("{} {}", tr(ui, 485, "Version"), s.version);
             meta = version.clone();
@@ -176,6 +226,10 @@ pub fn refresh(ui: &HomeWindow) {
                 chips.push(DetailChip { icon: 6, text: tr(ui, 488, "Checking…").into(), warn: false });
             } else if !s.latest.is_empty() && !update_available(&s) {
                 chips.push(DetailChip { icon: 6, text: tr(ui, 489, "Up to date").into(), warn: false });
+            }
+            /* A move that failed. */
+            if !s.error.is_empty() {
+                chips.push(DetailChip { icon: 13, text: error_text(ui, &s.error).into(), warn: true });
             }
             actions.push(action(0, tr(ui, 1362, "Open PortMaster"), true));
             captions.push(tr(ui, 1363, "Browse, install and update ports over Wi-Fi").into());
@@ -190,6 +244,9 @@ pub fn refresh(ui: &HomeWindow) {
             auto.on = s.auto_update;
             actions.push(auto);
             captions.push(tr(ui, 1368, "New versions install when this page checks for updates").into());
+            if s.sd2_slot {
+                location_action(ui, &s, &mut actions, &mut captions);
+            }
             if !s.previous.is_empty() {
                 actions.push(action(9, tr_arg(ui, 853, "Restore Version {0}", &s.previous), false));
                 captions.push(SharedString::new());
@@ -205,17 +262,21 @@ pub fn refresh(ui: &HomeWindow) {
             });
         }
         _ => {
-            let detail = match s.error.as_str() {
-                "" => String::new(),
-                "space" => tr(ui, 493, "Not enough free space"),
-                "network" => tr(ui, 494, "Check the network connection"),
-                _ => tr(ui, 1361, "PortMaster could not be downloaded"),
-            };
+            let detail = error_text(ui, &s.error);
             if !detail.is_empty() {
                 chips.push(DetailChip { icon: 13, text: detail.clone().into(), warn: true });
             }
-            actions.push(action(4, tr(ui, 1359, "Download PortMaster"), true));
+            /* Ports on SD2 while the card is out. */
+            if s.on_sd2 && !s.ready {
+                chips.push(DetailChip { icon: 13, text: tr(ui, 81, "Insert SD2").into(), warn: true });
+            }
+            let mut download = action(4, tr(ui, 1359, "Download PortMaster"), true);
+            download.enabled = !s.on_sd2 || s.ready;
+            actions.push(download);
             captions.push(detail.into());
+            if s.sd2_slot {
+                location_action(ui, &s, &mut actions, &mut captions);
+            }
         }
     }
     ui.set_app_page_kicker(name.to_uppercase().into());
@@ -241,6 +302,8 @@ pub fn open(ui: &HomeWindow) {
     ui.set_settings_open(true);
     write_ui_context("portmaster");
     refresh(ui);
+    /* The ports folder now: an SD2 card may have come or gone. */
+    send("REFRESH".into());
     /* One request to PortMaster's releases: is there a newer one? */
     let s = SNAPSHOT.lock().unwrap().clone();
     if let Some(s) = s {
@@ -258,6 +321,23 @@ pub fn leave(ui: &HomeWindow) {
     ui.set_settings_open(false);
     ui.set_portmaster_active(false);
     write_ui_context("home");
+}
+
+/* Ports on SD2 switched: portsd moves them; a card that is out says so. */
+fn move_ports(ui: &HomeWindow, to_sd2: bool) {
+    let weak = ui.as_weak();
+    thread::spawn(move || {
+        let reply = command_reply(&format!("LOCATION\t{}", if to_sd2 { "sd2" } else { "console" })).unwrap_or_default();
+        if reply.trim() != "ERR card" {
+            return;
+        }
+        let _ = slint::invoke_from_event_loop(move || {
+            if let Some(ui) = weak.upgrade() {
+                play_ui_sound("error");
+                ui.set_gen_notice(tr(&ui, 81, "Insert SD2").into());
+            }
+        });
+    });
 }
 
 fn launch(ui: &HomeWindow) {
@@ -306,10 +386,12 @@ pub fn handle_action(ui: &HomeWindow, action: &str) {
         _ => return,
     }
     ui.set_gen_notice("".into());
-    let key = installed_actions(&s).get(index.max(0) as usize).copied().unwrap_or("");
+    let key = page_actions(&s).get(index.max(0) as usize).copied().unwrap_or("");
     match (page_state(&s), key) {
+        (_, "location") => move_ports(ui, !s.on_sd2),
+        ("absent", _) if s.on_sd2 && !s.ready => {}
         ("absent", _) => send("PM_INSTALL".into()),
-        ("installing", _) => send("PM_CANCEL".into()),
+        ("installing" | "moving", _) => send("PM_CANCEL".into()),
         (_, "open") => launch(ui),
         (_, "update") if update_available(&s) => send("PM_INSTALL".into()),
         (_, "update") => send("PM_CHECK".into()),

@@ -1,0 +1,32 @@
+From: nuubOS Project <noreply@nuubos.invalid>
+Subject: [PATCH] panfrost: checksum only shared and scanout render targets
+
+Transaction elimination (a CRC per 16x16 tile, an unchanged tile is not
+written back) pays off on buffers whose content stays partly the same
+from frame to frame: window and scanout buffers (UI, bezels, black
+bands). Emulators render into off-screen targets they redraw completely
+every frame, where the CRC never skips a tile and only adds the CRC
+computation and the CRC buffer traffic. Measured on a Mali-G31 MP1
+(H700), PPSSPP God of War: fragment engine 64-65 % busy with CRC on every
+render target, 50-57 % with PAN_MESA_DEBUG=nocrc; a 2D game (SNES) the
+same either way. Keep the CRC for render targets that are shared or
+scanned out.
+
+Signed-off-by: nuubOS Project <noreply@nuubos.invalid>
+---
+--- a/src/gallium/drivers/panfrost/pan_resource.c
++++ b/src/gallium/drivers/panfrost/pan_resource.c
+@@ -536,8 +536,12 @@
+    unsigned bytes_per_pixel = MAX2(pres->base.nr_samples, 1) *
+                               util_format_get_blocksize(pres->base.format);
+ 
++   /* Off-screen targets are usually redrawn whole every frame: the CRC
++    * only costs there. Window and scanout buffers keep it. */
++   bool presented = pres->base.bind & (PIPE_BIND_SHARED | PIPE_BIND_SCANOUT);
++
+    return pres->base.bind & PIPE_BIND_RENDER_TARGET && panfrost_is_2d(pres) &&
+-          bytes_per_pixel <= bytes_per_pixel_max &&
++          presented && bytes_per_pixel <= bytes_per_pixel_max &&
+           pres->base.last_level == 0 && !(dev->debug & PAN_DBG_NO_CRC);
+ }
+ 

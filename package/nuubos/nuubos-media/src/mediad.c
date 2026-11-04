@@ -364,7 +364,10 @@ static bool save_music_volume(int v)
 	if (!fp)
 		return false;
 	fprintf(fp, "MUSIC_VOLUME=%d\n", v);
-	if (fclose(fp) != 0 || rename(tmp, path) != 0) {
+	/* fsync: /userdata is exFAT, an unsynced file renamed into place comes
+	 * back empty after a crash. */
+	if (fflush(fp) != 0 || fsync(fileno(fp)) != 0 || fclose(fp) != 0 ||
+	    rename(tmp, path) != 0) {
 		unlink(tmp);
 		return false;
 	}

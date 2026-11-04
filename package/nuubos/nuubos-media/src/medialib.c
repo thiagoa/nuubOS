@@ -930,7 +930,10 @@ static bool plist_save(const char *file, const struct plist *p)
 		title_of(slash ? slash + 1 : p->path[i], title, sizeof(title), NULL);
 		fprintf(fp, "#EXTINF:-1,%s\n%s\n", title, p->path[i]);
 	}
-	if (fclose(fp) != 0 || rename(tmp, file) != 0) {
+	/* fsync: /userdata is exFAT, an unsynced file renamed into place comes
+	 * back empty after a crash. */
+	if (fflush(fp) != 0 || fsync(fileno(fp)) != 0 || fclose(fp) != 0 ||
+	    rename(tmp, file) != 0) {
 		unlink(tmp);
 		return false;
 	}

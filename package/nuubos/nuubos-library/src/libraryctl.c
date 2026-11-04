@@ -26,6 +26,7 @@ static void usage(void)
 		"  watch                          print every snapshot change\n"
 		"  scan                           rescan ROM storage\n"
 		"  show-unavailable 0|1           list unavailable games (device setting)\n"
+		"  wrap-rows 0|1                  Home rows go round (device setting)\n"
 		"  games SCOPE                    system:<id> | collection:<id> | recent\n"
 		"  search [k=v|k=v]               q, system, collection, tag, year=A-B, genre, players, unplayed=1, random=1\n"
 		"  filters\n"
@@ -132,6 +133,10 @@ int main(int argc, char **argv)
 		return run("SCAN", false, false);
 	if (!strcmp(verb, "show-unavailable") && argc == 3 && (!strcmp(argv[2], "0") || !strcmp(argv[2], "1"))) {
 		snprintf(command, sizeof(command), "SHOW_UNAVAILABLE\t%s", argv[2]);
+		return run(command, false, false);
+	}
+	if (!strcmp(verb, "wrap-rows") && argc == 3 && (!strcmp(argv[2], "0") || !strcmp(argv[2], "1"))) {
+		snprintf(command, sizeof(command), "WRAP_ROWS\t%s", argv[2]);
 		return run(command, false, false);
 	}
 	if (!strcmp(verb, "games") && argc == 3) {

@@ -1,0 +1,6 @@
+# Move a category of user data between SD1 and SD2 (category, sd2|sd1)
+COMMAND=/usr/sbin/nuubos-storagectl data move
+SCOPE=device
+CANCEL=1
+RETRY=1
+ARGS=2

@@ -25,6 +25,9 @@ define NUUBOS_PORTS_BUILD_CMDS
 	$(TARGET_CC) $(TARGET_CFLAGS) $(TARGET_LDFLAGS) \
 		-std=c11 -D_GNU_SOURCE -Wall -Wextra -Werror -Wno-format-truncation \
 		$(@D)/portmaster-get.c -o $(@D)/nuubos-portmaster-get -lcurl -lcrypto
+	$(TARGET_CC) $(TARGET_CFLAGS) $(TARGET_LDFLAGS) \
+		-std=c11 -D_GNU_SOURCE -Wall -Wextra -Werror -Wno-format-truncation \
+		$(@D)/ports-move.c -o $(@D)/nuubos-ports-move
 endef
 
 # Port scripts expect /roms/ports (PortMaster's default layout); USERDATA
@@ -34,6 +37,7 @@ define NUUBOS_PORTS_INSTALL_TARGET_CMDS
 	$(INSTALL) -D -m 0755 $(@D)/nuubos-portsctl $(TARGET_DIR)/usr/bin/nuubos-portsctl
 	$(INSTALL) -D -m 0755 $(@D)/nuubos-portmaster-get \
 		$(TARGET_DIR)/usr/lib/nuubos/nuubos-portmaster-get
+	$(INSTALL) -D -m 0755 $(@D)/nuubos-ports-move $(TARGET_DIR)/usr/lib/nuubos/nuubos-ports-move
 	$(INSTALL) -D -m 0755 $(@D)/nuubos-ports-mount $(TARGET_DIR)/usr/lib/nuubos/ports/bin/mount
 	ln -sfn mount $(TARGET_DIR)/usr/lib/nuubos/ports/bin/umount
 	$(INSTALL) -D -m 0644 $(@D)/portmaster/mod_nuubOS.txt \

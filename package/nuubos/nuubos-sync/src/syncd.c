@@ -1325,6 +1325,12 @@ static void start_child(const char *user)
 		/* Run the server itself, not its monitor (a second ~44 MB
 		 * process that only restarts it): syncd supervises. */
 		setenv("STMONITORED", "yes", 1);
+		/* Less heap kept between Go collections (1 GB device, games
+		 * next to it): collect at +50 % instead of +100 % and work
+		 * harder above 32 MiB (a soft limit, never an allocation
+		 * failure). */
+		setenv("GOGC", "50", 1);
+		setenv("GOMEMLIMIT", "32MiB", 1);
 		/* Background work must not slow a game down. */
 		if (nice(10) < 0)
 			perror("nice"); /* keeps the default priority */

@@ -15,6 +15,10 @@
 #   sd2 use                   use an ignored or ejected card (background)
 #   sd2 prepare               create the game folders (job worker)
 #   sd2 format <CID>          erase and format exFAT (job worker)
+#   data apply                bind the data folders (boot, user switch)
+#   data move CAT sd2|sd1     move a category of user data (job worker)
+#   data forget CAT           the card is gone: CAT back on SD1, without
+#                             what the card holds
 #
 # State (/run/nuubos/storage/sd2.status): SD2_SLOT=0|1, SD2_STATE=
 # none|empty|checking|ready|readonly|unreadable|ejected, SD2_PATH (mount
@@ -23,6 +27,22 @@
 # the user's choice; cleared by ignore/prepare/format). SD2_STATE=ignored: a
 # card the user chose not to use (CID in /state/storage/sd2-ignored). Every change pokes
 # nuubos-systemd (snapshot to its subscribers) and libraryd (SCAN).
+#
+# Data on SD2 (GitHub #24, opt-in per category, all on SD1 by default):
+# bios, saves, states, screenshots (with recordings), library (covers,
+# metadata and the scraping cache). A category on SD2 lives in the card's
+# nuubOS folder with SD1's layout (nuubOS/users/<id>/saves...) and is
+# bind-mounted over its /userdata folder, so every service keeps its paths.
+# The card is this console's by its nuubOS/.nuubos-data TOKEN (also in
+# /state/storage/data.conf); all categories on SD2 share that one card.
+# Without it (out, ejected, another card) each folder is an empty
+# read-only tmpfs: nothing lands on SD1 meanwhile, nuubos-emud refuses
+# games (bios, saves, states), Syncthing stops on the missing folder
+# marker. A move copies first (nuubos-data-move), the folders read-only
+# meanwhile; the SD1 side is reached through the TF1 view, which no bind
+# covers. State: /run/nuubos/storage/data.status, DATA_ON=<categories>,
+# DATA_STATE=none|online|offline|moving, DATA_MOVING, DATA_CONFLICTS (files
+# of the last move kept in <destination>/conflicts/<date>).
 
 . /usr/lib/nuubos/exfat-health.sh
 
@@ -35,6 +55,15 @@ KNOWN_DIR=/state/storage
 KNOWN="$KNOWN_DIR/sd2-known"
 IGNORED="$KNOWN_DIR/sd2-ignored"
 SYSTEMS=/usr/share/nuubos/systems.conf
+DATA_CONF="$KNOWN_DIR/data.conf"
+DATA_STATUS="$STATUS_DIR/data.status"
+DATA_DIR="$MOUNT/nuubOS"
+DATA_MARK="$DATA_DIR/.nuubos-data"
+DATA_MOVE=/usr/lib/nuubos/nuubos-data-move
+DATA_CATS="bios saves states screenshots library"
+TF1=/run/nuubos/storage/tf1
+PLACEHOLDER=nuubos-sd2-data
+MOVING=""
 # TF2 is MMC2 on every H700 board (kernel 0036); found by its controller,
 # not by its device number.
 HOST=4022000.mmc
@@ -107,6 +136,7 @@ load_status()
 
 announce()
 {
+    [ -n "$MOVING" ] || apply_data
     # The backup status depends on the card too; it pokes nuubos-systemd.
     if [ -x /usr/sbin/nuubos-sd2-backup ]; then
         /usr/sbin/nuubos-sd2-backup refresh >/dev/null 2>&1
@@ -308,7 +338,9 @@ eject()
     state="$(value "$SD2_STATUS" SD2_STATE)"
     case "$state" in ready|readonly) ;; *) echo "ERR not-mounted"; return 1 ;; esac
     sync
+    data_release || { echo "ERR busy"; return 1; }
     if ! umount "$MOUNT" 2>/dev/null; then
+        apply_data
         echo "ERR busy"
         return 1
     fi
@@ -325,7 +357,8 @@ ignore()
     [ -n "$CID" ] || { echo "ERR absent"; return 1; }
     if mounted; then
         sync
-        umount "$MOUNT" 2>/dev/null || { echo "ERR busy"; return 1; }
+        data_release || { echo "ERR busy"; return 1; }
+        umount "$MOUNT" 2>/dev/null || { apply_data; echo "ERR busy"; return 1; }
     fi
     remember "$CID"
     set_ignored "$CID" 1
@@ -373,10 +406,13 @@ format_card()
     CID="$(card_cid "$disk")"
     [ "$CID" = "$expected" ] || fail changed
     case "/dev/$disk" in "$(sed -n 's/.*root=\(\/dev\/mmcblk[0-9]*\).*/\1/p' /proc/cmdline)"*) fail boot-disk ;; esac
+    # Never the card with the user's data: it moves back to SD1 first.
+    [ -n "$(value "$DATA_CONF" ON)" ] && data_card && fail data
     progress 5
     if mounted; then
         sync
-        umount "$MOUNT" 2>/dev/null || fail busy
+        data_release || fail busy
+        umount "$MOUNT" 2>/dev/null || { apply_data; fail busy; }
     fi
     write_status checking
     announce rescan
@@ -396,6 +432,198 @@ format_card()
     prepare >/dev/null
     toast formatted
     echo "@progress 100"
+}
+
+# --- Data on SD2 ---------------------------------------------------------
+
+data_on() { case ",$(value "$DATA_CONF" ON)," in *",$1,"*) return 0 ;; esac; return 1; }
+
+# Folders of a category, relative to /userdata (every profile's).
+cat_paths()
+{
+    case "$1" in
+        bios) echo bios ;;
+        library) echo library/covers; echo library/metadata; echo library/cache ;;
+        saves|states|screenshots)
+            for p in /state/users/*/profile.conf; do
+                [ -f "$p" ] || continue
+                u="${p%/profile.conf}"; u="${u##*/}"
+                [ "$u" = default ] && continue
+                if [ "$1" = screenshots ]; then
+                    echo "users/$u/screenshots"; echo "users/$u/recordings"
+                else
+                    echo "users/$u/$1"
+                fi
+            done
+            ;;
+    esac
+}
+
+# The card in the slot holds this console's data.
+data_card()
+{
+    case "$(value "$SD2_STATUS" SD2_STATE)" in ready|readonly) ;; *) return 1 ;; esac
+    mounted || return 1
+    token="$(value "$DATA_CONF" TOKEN)"
+    [ -n "$token" ] && [ "$(value "$DATA_MARK" TOKEN)" = "$token" ]
+}
+
+# What covers /userdata/<rel>: "fstype source root" of the top mount.
+mounted_at() { awk -v m="/userdata/$1" '$5 == m { for (i = 7; $i != "-"; i++); t = $(i + 1) " " $(i + 2) " " $4 } END { if (t != "") print t }' /proc/self/mountinfo; }
+
+# Ours: the placeholder, or a folder of the card's nuubOS.
+ours() { awk -v p="$PLACEHOLDER" '$5 ~ "^/userdata/" { for (i = 7; $i != "-"; i++); if ($(i + 2) == p || tolower($4) ~ "^/nuubos/") print $5 }' /proc/self/mountinfo; }
+
+release_at() { while [ -n "$(mounted_at "$1")" ]; do umount -l "/userdata/$1" 2>/dev/null || break; done; }
+
+placeholder()
+{
+    release_at "$1"
+    mkdir -p "/userdata/$1" &&
+        mount -t tmpfs -o ro,nosuid,nodev,noexec,size=4k,mode=0755 "$PLACEHOLDER" "/userdata/$1" ||
+        log "data: no placeholder over $1"
+}
+
+write_data_status()
+{
+    mkdir -p "$STATUS_DIR"
+    {
+        echo "DATA_ON=$(value "$DATA_CONF" ON)"
+        echo "DATA_STATE=$1"
+        echo "DATA_MOVING=${2:-}"
+        echo "DATA_CONFLICTS=$(value "$DATA_CONF" CONFLICTS)"
+    } > "$DATA_STATUS.tmp" && mv "$DATA_STATUS.tmp" "$DATA_STATUS"
+}
+
+write_data_conf()
+{
+    mkdir -p "$KNOWN_DIR"
+    { echo "ON=$1"; echo "TOKEN=$2"; echo "CONFLICTS=${3:-0}"; } > "$DATA_CONF.tmp" &&
+        mv "$DATA_CONF.tmp" "$DATA_CONF" && sync
+}
+
+# Every folder of a category on SD2 bound to the card, or covered while
+# the card is away; anything else of ours goes (a category back on SD1, a
+# deleted profile). Only what differs changes: a running game keeps its
+# folders.
+apply_data()
+{
+    on="$(value "$DATA_CONF" ON)"
+    state=none
+    if [ -n "$on" ]; then
+        if data_card; then state=online; else state=offline; fi
+    fi
+    dev="$(awk -v m="$MOUNT" '$2 == m { d = $1 } END { print d }' /proc/mounts)"
+    want=" "
+    for c in $DATA_CATS; do
+        data_on "$c" || continue
+        for rel in $(cat_paths "$c"); do
+            want="$want$rel "
+            cur="$(mounted_at "$rel")"
+            if [ "$state" = online ]; then
+                if [ -n "$dev" ] && [ "$(echo "$cur" | cut -d' ' -f2)" = "$dev" ] &&
+                   [ "$(echo "${cur##* }" | tr A-Z a-z)" = "$(echo "/nuubOS/$rel" | tr A-Z a-z)" ]; then
+                    continue
+                fi
+                release_at "$rel"
+                mkdir -p "$DATA_DIR/$rel" "/userdata/$rel" &&
+                    mount --bind "$DATA_DIR/$rel" "/userdata/$rel" ||
+                    { log "data: bind of $rel failed"; placeholder "$rel"; }
+            else
+                case "$cur" in "tmpfs $PLACEHOLDER "*) continue ;; esac
+                placeholder "$rel"
+            fi
+        done
+    done
+    for m in $(ours); do
+        case "$want" in *" ${m#/userdata/} "*) continue ;; esac
+        umount -l "$m" 2>/dev/null
+    done
+    write_data_status "$state"
+}
+
+# Eject, Don't Use: the card's folders let go first (open files: busy).
+data_release()
+{
+    for m in $(ours); do
+        umount "$m" 2>/dev/null || { apply_data; return 1; }
+    done
+    return 0
+}
+
+data_move()
+{
+    cat="$1"; where="$2"
+    case " $DATA_CATS " in *" $cat "*) ;; *) fail category ;; esac
+    case "$where" in sd2|sd1) ;; *) fail where ;; esac
+    on="$(value "$DATA_CONF" ON)"
+    token="$(value "$DATA_CONF" TOKEN)"
+    if data_on "$cat"; then [ "$where" = sd2 ] && { echo "@progress 100"; return 0; }
+    else [ "$where" = sd1 ] && { echo "@progress 100"; return 0; }; fi
+    [ "$(value "$SD2_STATUS" SD2_STATE)" = ready ] && mounted || fail card
+    [ -d "$TF1/users" ] || fail write
+    nuubos-emuctl status 2>/dev/null | grep -q '^state=running' && fail game
+    if [ "$where" = sd2 ] && [ -z "$on" ]; then
+        # The first category on SD2: this card becomes the data card.
+        [ -n "$token" ] || token="$(cat /proc/sys/kernel/random/uuid)"
+        mkdir -p "$DATA_DIR" && echo "TOKEN=$token" > "$DATA_MARK.tmp" && mv "$DATA_MARK.tmp" "$DATA_MARK" || fail write
+        write_data_conf "" "$token" "$(value "$DATA_CONF" CONFLICTS)"
+    else
+        # Every category on SD2 is on one card.
+        data_card || fail card
+    fi
+    stamp="$(date +%Y%m%d-%H%M%S)"
+    if [ "$where" = sd2 ]; then conflicts="$DATA_DIR/conflicts/$stamp"; else conflicts="$TF1/conflicts/$stamp"; fi
+    paths="$(cat_paths "$cat")"
+    [ -n "$paths" ] || fail write
+    log "data: moving $cat to $where"
+    # Nothing writes into the folders while they move.
+    MOVING="$cat"
+    # Done, failed or cancelled (SIGTERM to the job's group, the mover
+    # cleans up first): the folders are bound again as the setting says.
+    trap 'MOVING=""; announce' EXIT
+    trap 'exit 1' TERM INT
+    write_data_status moving "$cat"
+    for rel in $paths; do placeholder "$rel"; done
+    announce
+    set --
+    for rel in $paths; do
+        if [ "$where" = sd2 ]; then set -- "$@" "$rel" "$TF1/$rel" "$DATA_DIR/$rel"
+        else set -- "$@" "$rel" "$DATA_DIR/$rel" "$TF1/$rel"; fi
+    done
+    res="$STATUS_DIR/data-move.result"
+    rm -f "$res"
+    "$DATA_MOVE" "$conflicts" "$@" 2>/dev/null | while IFS= read -r line; do
+        case "$line" in
+            "@done "*) echo "${line#@done }" > "$res" ;;
+            *) echo "$line" ;;
+        esac
+    done
+    [ -f "$res" ] || { log "data: move of $cat failed"; exit 1; }
+    n="$(cat "$res")"; rm -f "$res"
+    if [ "$where" = sd2 ]; then
+        on="$(echo "$on,$cat" | sed 's/^,//')"
+    else
+        on="$(echo ",$on," | sed "s/,$cat,/,/; s/^,//; s/,\$//")"
+    fi
+    write_data_conf "$on" "$token" "$n"
+    log "data: $cat moved to $where ($n conflicts)"
+    echo "@result $n"
+    echo "@progress 100"
+}
+
+# The card is gone for good: the category is back on SD1's folders (what
+# they held before the move); what the card holds stays there.
+data_forget()
+{
+    data_on "$1" || { echo OK; return 0; }
+    data_card && { echo "ERR card"; return 1; }
+    on="$(value "$DATA_CONF" ON)"
+    on="$(echo ",$on," | sed "s/,$1,/,/; s/^,//; s/,\$//")"
+    write_data_conf "$on" "$(value "$DATA_CONF" TOKEN)" 0
+    log "data: $1 back on SD1 without the card"
+    announce
+    echo OK
 }
 
 status()
@@ -429,8 +657,16 @@ case "${1:-}" in
             *) echo "Usage: nuubos-storagectl sd2 attach|eject|ignore|use|prepare|format CID" >&2; exit 2 ;;
         esac
         ;;
+    data)
+        case "${2:-}" in
+            apply) locked apply_data ;;
+            move) locked data_move "${3:-}" "${4:-}" ;;
+            forget) locked data_forget "${3:-}" ;;
+            *) echo "Usage: nuubos-storagectl data apply|move CAT sd2|sd1|forget CAT" >&2; exit 2 ;;
+        esac
+        ;;
     *)
-        echo "Usage: nuubos-storagectl status | hotplug add|remove DISK | sd2 attach|eject|ignore|use|prepare|format CID" >&2
+        echo "Usage: nuubos-storagectl status | hotplug add|remove DISK | sd2 attach|eject|ignore|use|prepare|format CID | data apply|move|forget" >&2
         exit 2
         ;;
 esac

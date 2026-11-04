@@ -1,0 +1,12 @@
+config BR2_PACKAGE_RAOFFLINEPROXY
+	bool "raofflineproxy"
+	depends on BR2_PACKAGE_PYTHON3
+	help
+	  Local RetroAchievements proxy (misantronic): caches each
+	  game's achievement data while online and queues casual
+	  unlocks earned offline, sending them once the server is
+	  reachable again. nuubos-emud runs it for the casual sessions
+	  of a user with Offline Achievements on (GitHub #18). Only the
+	  Linux service (Python) is installed.
+
+	  https://github.com/misantronic/RAOfflineProxy

@@ -1522,7 +1522,7 @@ fn refresh_controllers(ui: &HomeWindow) {
 /// Localized name of a logical controller control (Controllers service ids).
 pub(crate) fn control_label(ui: &HomeWindow, control: &str) -> String {
     if control.is_empty() {
-        return tr(ui, 1418, "Not Assigned");
+        return tr(ui, 1483, "Not Assigned");
     }
     let (index, fallback) = match control {
         "menu_confirm" => (337, "Face South"),
@@ -2082,6 +2082,24 @@ fn set_home_music_enabled(ui: &HomeWindow, enabled: bool) {
     });
 }
 
+/* Volume Button Step (GitHub #6): percent per Vol+/Vol- press, applied by
+ * audiod. */
+const VOLUME_STEPS: [i32; 4] = [1, 2, 5, 10];
+
+/* The choice sheet, as every multiple-choice row in Settings. */
+fn open_volume_step_choice(ui: &HomeWindow) {
+    let options = VOLUME_STEPS.iter().map(|v| (v.to_string(), format!("{v}%"))).collect();
+    open_settings_choice(ui, "volume-step", &tr(ui, 1418, "Volume Button Step"), options, &ui.get_volume_step().to_string());
+}
+
+fn set_volume_step(ui: &HomeWindow, value: &str) {
+    let Some(step) = value.parse::<i32>().ok().filter(|v| VOLUME_STEPS.contains(v)) else { return };
+    ui.set_volume_step(step);
+    thread::spawn(move || {
+        let _ = audio_socket_command(&format!("VOLUME STEP SET {step}"));
+    });
+}
+
 fn set_power_sounds_enabled(ui: &HomeWindow, enabled: bool) {
     ui.set_power_sounds_enabled(enabled);
     thread::spawn(move || {
@@ -2105,9 +2123,11 @@ fn refresh_audio_policy(ui: &HomeWindow) {
         let power = parse_audio_policy_int("SYSTEM POWER GET", 1) != 0;
         let notify = parse_audio_policy_int("SYSTEM NOTIFY GET", 1) != 0;
         let music = parse_audio_policy_int("MUSIC ENABLED GET", 1) != 0;
+        let volume_step = parse_audio_policy_int("VOLUME STEP GET", 1);
         let _ = slint::invoke_from_event_loop(move || {
             if let Some(ui) = weak.upgrade() {
                 ui.set_applications_volume(applications);
+                ui.set_volume_step(volume_step);
                 ui.set_navigation_sounds_enabled(navigation);
                 ui.set_power_sounds_enabled(power);
                 ui.set_notify_sounds_enabled(notify);
@@ -2185,12 +2205,33 @@ fn start_home_music_session() {
  * nothing here: inputd routes them to the game gamepads by itself. */
 fn on_game_session(ui: &HomeWindow, running: bool) {
     eprintln!("home: game session running={running}");
+    home_window_shown(ui, !running);
     if running {
         thread::spawn(stop_home_music_session);
     } else {
         thread::spawn(start_home_music_session);
         /* A games card inserted during the session asks now. */
         storageui::maybe_ask(ui);
+    }
+}
+
+/* While a game or a port covers Home, its window is destroyed (on Wayland
+ * Slint's hide() drops the surface and the GL context): FemtoVG's textures,
+ * layers and glyph atlas, ~88 MB of GPU memory on the CubeXX (2026-10-29),
+ * go back to the system for the game. It comes back when the game starts
+ * quitting (the Quick Menu's closing screen covers it meanwhile) or at
+ * the session end. */
+pub(crate) fn home_window_shown(ui: &HomeWindow, shown: bool) {
+    let visible = ui.window().is_visible();
+    if shown && !visible {
+        if let Err(error) = ui.show() {
+            eprintln!("home: window show failed={error}");
+        }
+        ui.window().set_fullscreen(true);
+    } else if !shown && visible {
+        if let Err(error) = ui.hide() {
+            eprintln!("home: window hide failed={error}");
+        }
     }
 }
 
@@ -2624,6 +2665,7 @@ fn apply_settings_choice(ui: &HomeWindow) {
         c if storageui::owns_choice(c) => storageui::apply_choice(ui, c, value),
         c if syncui::owns_choice(c) => syncui::apply_choice(ui, c, value),
         "rumble-mode" => rumble_set_mode(ui, value),
+        "volume-step" => set_volume_step(ui, &value),
         "player-assignment" => {
             let player_index = ui.get_player_assignment_index().max(0) as usize;
             let Some(assignment) = ui.get_player_assignments().row_data(player_index) else {
@@ -4342,19 +4384,19 @@ fn update_display_audio_scroll(ui: &HomeWindow, count: i32) {
 /// Display & Audio rows by function. Color Temperature (row 1) exists only
 /// when the panel supports it; the rows below it move up when it does not.
 #[derive(Clone, Copy, PartialEq)]
-enum DaRow { Brightness, ColorTemperature, Output, Volume, Applications, HomeMusicOn, HomeMusic, TestSound, SystemSounds, NavigationSounds, NotifySounds, PowerSounds,
+enum DaRow { Brightness, ColorTemperature, Output, Volume, VolumeStep, Applications, HomeMusicOn, HomeMusic, TestSound, SystemSounds, NavigationSounds, NotifySounds, PowerSounds,
     CastSound, CastLatency, CastEncoder }
 
 /* Rows without Color Temperature and without SCREEN CASTING (3 rows, only
  * while nuubos-castd runs). */
-const DA_ROWS: i32 = 11;
+const DA_ROWS: i32 = 12;
 
 fn display_audio_count(ui: &HomeWindow) -> i32 {
     DA_ROWS + ui.get_da_temp() + if ui.get_cast_available() { 3 } else { 0 }
 }
 
 fn display_audio_row(ui: &HomeWindow) -> DaRow {
-    const ROWS: [DaRow; 15] = [DaRow::Brightness, DaRow::ColorTemperature, DaRow::Output, DaRow::Volume, DaRow::Applications,
+    const ROWS: [DaRow; 16] = [DaRow::Brightness, DaRow::ColorTemperature, DaRow::Output, DaRow::Volume, DaRow::VolumeStep, DaRow::Applications,
         DaRow::HomeMusicOn, DaRow::HomeMusic, DaRow::TestSound, DaRow::SystemSounds, DaRow::NavigationSounds, DaRow::NotifySounds, DaRow::PowerSounds,
         DaRow::CastSound, DaRow::CastLatency, DaRow::CastEncoder];
     let index = ui.get_display_audio_index().clamp(0, display_audio_count(ui) - 1);
@@ -4778,7 +4820,8 @@ fn handle_settings_action(
         }
         return;
     }
-    if (52..=66).contains(&view) || view == filesui::RECOVERY_VIEW || view == tsui::VIEW {
+    if (52..=66).contains(&view) || view == filesui::RECOVERY_VIEW || view == tsui::VIEW
+        || view == storageui::DATA_VIEW || view == gameui::SYSTEMS_VIEW || view == gameui::SYSTEM_VIEW {
         gameui::handle_page(ui, view, action);
         return;
     }
@@ -5461,6 +5504,7 @@ fn handle_settings_action(
                 "menu_confirm" => match row {
                     DaRow::Output => open_audio_output_dropdown(ui),
                     DaRow::Volume => audio_toggle_mute(ui),
+                    DaRow::VolumeStep => open_volume_step_choice(ui),
                     DaRow::Applications => toggle_stream_mute(ui, false),
                     DaRow::HomeMusicOn => set_home_music_enabled(ui, !ui.get_home_music_enabled()),
                     DaRow::HomeMusic if ui.get_home_music_enabled() => toggle_stream_mute(ui, true),
@@ -5801,13 +5845,14 @@ fn route_input_action(
         return;
     }
 
-    /* Home carousels / library grid. */
+    /* Home carousels / library grid (L1/R1 and L2/R2 only in a game list). */
     if !settings_active.load(Ordering::SeqCst) &&
         !user_picker_active.load(Ordering::SeqCst) &&
         matches!(
             action,
             "menu_up" | "menu_down" | "menu_left" | "menu_right" |
-            "menu_confirm" | "menu_back" | "face_north" | "face_west" | "select"
+            "menu_confirm" | "menu_back" | "face_north" | "face_west" | "select" |
+            "page_prev" | "page_next" | "tab_prev" | "tab_next"
         )
     {
         let action = action.to_owned();
@@ -6437,7 +6482,9 @@ fn main() -> Result<(), slint::PlatformError> {
         }
     });
 
-    let result = ui.run();
+    /* Not ui.run(): that ends the event loop when the window is hidden,
+     * and Home hides it during games (home_window_shown). */
+    let result = ui.show().and_then(|_| slint::run_event_loop_until_quit());
 
     set_ui_capture(false);
 

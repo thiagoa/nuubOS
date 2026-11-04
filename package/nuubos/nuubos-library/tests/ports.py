@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 # Host test: PortMaster ports (EPIC-058) in the library: the scripts directly
 # in roms/ports, never a port's own folder, another folder or SD2; cover,
-# year, genre and details from PortMaster's gameinfo.xml.
+# year, genre and details from PortMaster's gameinfo.xml; with the ports
+# location on SD2 (GitHub #21) only the SD2 card's ports folder, in its own
+# spelling, and ports_root/ports_location in STATUS.
 # Run: python3 package/nuubos/nuubos-library/tests/ports.py
 import os, socket, subprocess, sys, tempfile, time
 
@@ -40,6 +42,13 @@ w('ametadatagame/gamedata/run.sh', '#!/bin/bash\n')
 w('PortMaster/PortMaster.sh', '#!/bin/bash\n')
 w('.nuubos/home/x.sh', '#!/bin/bash\n')
 open(ud + '/roms/snes/tool.sh', 'w').write('#!/bin/bash\n')
+# A games card with a muOS-style PORTS folder.
+sd2 = t + '/sd2'
+os.makedirs(sd2 + '/ROMS/PORTS/sd2port', exist_ok=True)
+open(sd2 + '/ROMS/PORTS/Card Port.sh', 'w').write('#!/bin/bash\n')
+open(sd2 + '/ROMS/PORTS/sd2port/run.sh', 'w').write('#!/bin/bash\n')
+os.makedirs(run + '/storage', exist_ok=True)
+open(run + '/storage/sd2.status', 'w').write('SD2_STATE=ready\nSD2_PATH=%s\n' % sd2)
 
 exe = t + '/libraryd'
 subprocess.check_call(['gcc', '-std=c11', '-D_GNU_SOURCE', '-Wall', '-Wextra', '-Werror',
@@ -93,6 +102,23 @@ try:
     check('details description on one line', 'meta_description=Embark on a journey. Solve puzzles & more.\n' in d)
     check('details developer and release', 'meta_developer=Luis Zuno (aka Ansimuz)\n' in d and 'meta_release=2020\n' in d)
     check('negative control: STATUS has a games count', 'games=' in st)
+    check('ports on the console', 'ports_location=console\n' in st and 'ports_root=%s\n' % ports in st)
+    check('PORTS_ROOT on the console names the SD2 folder', cmd('PORTS_ROOT') == 'OK console\t%s\t%s/ROMS/PORTS\n' % (ports, sd2))
+
+    # Ports on SD2: only its PORTS folder counts.
+    os.makedirs(t + '/state/ports', exist_ok=True)
+    open(t + '/state/ports/location.conf', 'w').write('LOCATION=sd2\n')
+    cmd('SCAN')
+    for _ in range(50):
+        st = cmd('STATUS')
+        if 'scanning=0' in st and 'ports_location=sd2' in st: break
+        time.sleep(0.1)
+    check('ports on SD2, own spelling', 'ports_root=%s/ROMS/PORTS\n' % sd2 in st)
+    rows = [l[5:].split('\t') for l in cmd('GAMES\tsystem:ports').splitlines() if l.startswith('game=')]
+    check('only the SD2 card\'s port', sorted(r[2] for r in rows) == ['Card Port'])
+    check('PORTS_ROOT for portsd', cmd('PORTS_ROOT') == 'OK sd2\t%s/ROMS/PORTS\t%s/ROMS/PORTS\n' % (sd2, sd2))
+    open(run + '/storage/sd2.status', 'w').write('SD2_STATE=ejected\n')
+    check('PORTS_ROOT empty while the card is out', cmd('PORTS_ROOT') == 'OK sd2\t\t\n')
 finally:
     proc.terminate(); proc.wait()
 if fails:
