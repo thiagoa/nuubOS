@@ -12,6 +12,9 @@ config BR2_PACKAGE_NUUBOS_EMULATION
 	select BR2_PACKAGE_LIBRETRO_CORE_INFO
 	select BR2_PACKAGE_LIBCURL # RetroAchievements login
 	select BR2_PACKAGE_CA_CERTIFICATES # RetroAchievements login (TLS)
+	select BR2_PACKAGE_PYTHON3 # offline achievements (RAOfflineProxy)
+	select BR2_PACKAGE_PYTHON3_SSL
+	select BR2_PACKAGE_RAOFFLINEPROXY
 	# Default core matrix qualified for H700 (cores.conf). Other
 	# cores can be downloaded by the user from RetroArch.
 	select BR2_PACKAGE_LIBRETRO_FCEUMM

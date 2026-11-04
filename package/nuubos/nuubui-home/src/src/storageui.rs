@@ -12,6 +12,9 @@
  *                       pages are filesui's: backup_rows/restore_rows/
  *                       backup_confirm)
  *   59 Backup Content   what the backup includes
+ *   75 Data on SD2      each category of user data on SD1 or SD2
+ *                       (GitHub #24, opt-in): choosing moves it
+ *                       (storage-data-move job, progress on the row)
  *
  * The state comes from the nuubos-systemd snapshot (storage.*), pushed on
  * every change; commands go to nuubos-systemd (eject, ignore, use, backup
@@ -33,6 +36,7 @@ use std::thread;
 
 pub const STORAGE_VIEW: i32 = 64;
 pub const CONTENT_VIEW: i32 = 59;
+pub const DATA_VIEW: i32 = 75;
 
 const SYSTEMCTL: &str = "/usr/bin/nuubos-systemctl";
 const JOBCTL: &str = "/usr/bin/nuubos-jobctl";
@@ -40,6 +44,19 @@ const BACKUPCTL: &str = "/usr/sbin/nuubos-sd2-backup";
 
 /* Backup items, in nuubos-sd2-backup order. */
 const ITEMS: [&str; 6] = ["saves", "states", "library", "screenshots", "bios", "covers"];
+
+/* Data on SD2 categories, in nuubos-storagectl order. */
+const DATA: [&str; 5] = ["bios", "saves", "states", "screenshots", "library"];
+
+fn data_title(ui: &HomeWindow, category: &str) -> String {
+    match category {
+        "bios" => tr(ui, 576, "BIOS Files"),
+        "saves" => tr(ui, 947, "Saves"),
+        "states" => tr(ui, 948, "Save States"),
+        "screenshots" => tr(ui, 951, "Screenshots & Recordings"),
+        _ => tr(ui, 953, "Covers & Metadata"),
+    }
+}
 
 /* storage.* of the nuubos-systemd snapshot. */
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -64,6 +81,9 @@ pub struct Storage {
     pub backup_dest: String,
     pub backup_available: bool,
     pub backup_found: bool,
+    pub data_on: String,
+    pub data_state: String,
+    pub data_moving: String,
 }
 
 impl Storage {
@@ -89,12 +109,19 @@ impl Storage {
             "storage.backup.dest" => self.backup_dest = value.to_owned(),
             "storage.backup.available" => self.backup_available = value == "1",
             "storage.backup.found" => self.backup_found = value == "1",
+            "storage.data.on" => self.data_on = value.to_owned(),
+            "storage.data.state" => self.data_state = value.to_owned(),
+            "storage.data.moving" => self.data_moving = value.to_owned(),
             _ => {}
         }
     }
 
     fn has_item(&self, item: &str) -> bool {
         self.backup_items.split(',').any(|i| i == item)
+    }
+
+    fn data_on_sd2(&self, category: &str) -> bool {
+        self.data_on.split(',').any(|c| c == category)
     }
 }
 
@@ -117,6 +144,9 @@ struct State {
     restore_user: String,
     /* The UI context before the operation screen (back on Close). */
     op_return_context: String,
+    /* Data on SD2: the category being moved and its progress. */
+    data_moving: String,
+    data_progress: i32,
 }
 
 /* The full-screen operation screen (SD2 restore, system update) owns the
@@ -224,6 +254,27 @@ fn build_rows(ui: &HomeWindow, st: &State, view: i32) -> Vec<(String, GenRow, bo
         return rows;
     }
 
+    if view == DATA_VIEW {
+        let moving = if st.data_moving.is_empty() { s.data_moving.clone() } else { st.data_moving.clone() };
+        for category in DATA {
+            let on = s.data_on_sd2(category);
+            let mut r = row(data_title(ui, category), if on { tr(ui, 64, "SD2") } else { tr(ui, 912, "SD1") },
+                if category == "library" { tr(ui, 954, "Downloaded game information; it can take a lot of space") }
+                else { String::new() });
+            if on && s.data_state == "offline" {
+                r.detail = tr(ui, 1437, "Waiting for the SD2 card").into();
+            }
+            if moving == category {
+                r.value = tr(ui, 1436, "Moving…").into();
+                r.progress_shown = true;
+                r.progress = st.data_progress.clamp(0, 100) as f32 / 100.0;
+            }
+            r.enabled = moving.is_empty();
+            rows.push((format!("data:{category}"), r, moving.is_empty()));
+        }
+        return rows;
+    }
+
     let busy = !st.busy.is_empty();
     let mut sd1 = row(tr(ui, 912, "SD1"), space(ui, s.sd1_free, s.sd1_total),
         tr(ui, 913, "System and saves"));
@@ -262,6 +313,13 @@ fn build_rows(ui: &HomeWindow, st: &State, view: i32) -> Vec<(String, GenRow, bo
             format.enabled = !busy;
             rows.push(("format".into(), format, !busy));
         }
+        let on = DATA.iter().filter(|c| s.data_on_sd2(c)).count();
+        let mut data = nav(tr(ui, 1435, "Data on SD2"),
+            if on == 0 { tr(ui, 54, "Off") }
+            else { tr(ui, 938, "{0} of {1}").replace("{0}", &on.to_string()).replace("{1}", &DATA.len().to_string()) });
+        data.detail = if s.data_state == "offline" { tr(ui, 1437, "Waiting for the SD2 card") }
+            else { tr(ui, 1439, "Saves, states, BIOS and covers") }.into();
+        rows.push(("data".into(), data, true));
     }
     rows.push(("media".into(), nav(tr(ui, 625, "Removable Media"), String::new()), true));
     rows
@@ -350,11 +408,15 @@ pub fn render(ui: &HomeWindow) {
         crate::filesui::render(ui);
         return;
     }
-    if view != STORAGE_VIEW && view != CONTENT_VIEW {
+    if view != STORAGE_VIEW && view != CONTENT_VIEW && view != DATA_VIEW {
         return;
     }
     let rows = STATE.with(|st| build_rows(ui, &st.borrow(), view));
-    let section = if view == CONTENT_VIEW { tr(ui, 936, "Backup Content") } else { tr(ui, 19, "Storage") };
+    let section = match view {
+        CONTENT_VIEW => tr(ui, 936, "Backup Content"),
+        DATA_VIEW => tr(ui, 1435, "Data on SD2"),
+        _ => tr(ui, 19, "Storage"),
+    };
     apply_rows(ui, rows, section.to_uppercase());
 }
 
@@ -453,8 +515,47 @@ fn job(ui: &HomeWindow, busy: &'static str, args: Vec<String>, done: fn(&HomeWin
 }
 
 fn start_format(ui: &HomeWindow, cid: String) {
-    job(ui, "format", vec!["sd2-format".into(), cid], |ui, ok, _| {
-        notice(ui, if ok { tr(ui, 971, "SD2 formatted") } else { tr(ui, 972, "The card could not be formatted") });
+    job(ui, "format", vec!["sd2-format".into(), cid], |ui, ok, out| {
+        notice(ui, if ok { tr(ui, 971, "SD2 formatted") }
+            /* The card with the user's data (Data on SD2). */
+            else if out.ends_with(" data") { tr(ui, 1442, "SD2 holds your data: move it to SD1 first") }
+            else { tr(ui, 972, "The card could not be formatted") });
+    });
+}
+
+/* Data on SD2: a category to the other card, progress on its row. */
+fn start_data_move(ui: &HomeWindow, category: &str, to: &str) {
+    STATE.with(|st| {
+        let mut st = st.borrow_mut();
+        st.data_moving = category.to_owned();
+        st.data_progress = 0;
+    });
+    render(ui);
+    let args = vec!["storage-data-move".to_owned(), category.to_owned(), to.to_owned()];
+    crate::gameui::job_with_progress(ui, args, |ui, p| {
+        STATE.with(|st| st.borrow_mut().data_progress = p);
+        render(ui);
+    }, |ui, result| {
+        STATE.with(|st| st.borrow_mut().data_moving.clear());
+        match result.strip_prefix("ERR ") {
+            None => {
+                let conflicts: u32 = result.trim().parse().unwrap_or(0);
+                notice(ui, if conflicts > 0 {
+                    tr_arg(ui, 1438, "{0} files were already there: the other copies are in the conflicts folder",
+                        &conflicts.to_string())
+                } else {
+                    tr(ui, 92, "Completed")
+                });
+            }
+            Some(error) if error.starts_with("cancelled") => {}
+            Some(error) => notice(ui, match error.rsplit(' ').next().unwrap_or("") {
+                "space" => tr(ui, 493, "Not enough free space"),
+                "card" => tr(ui, 1443, "Insert the SD2 card with your data"),
+                "game" => tr(ui, 628, "In use; close what uses it first"),
+                _ => tr(ui, 1444, "The data could not be moved"),
+            }),
+        }
+        render(ui);
     });
 }
 
@@ -646,8 +747,24 @@ fn confirm(ui: &HomeWindow, view: i32, key: &str) {
             }
         }
         "media" => crate::filesui::open_media(ui),
+        "data" => show(ui, DATA_VIEW),
         _ => {}
     }
+}
+
+/* A row of Data on SD2: SD1 or SD2. */
+fn data_confirm(ui: &HomeWindow, key: &str) {
+    let Some(category) = key.strip_prefix("data:") else { return };
+    let (s, moving) = STATE.with(|st| {
+        let st = st.borrow();
+        (st.storage.clone(), !st.data_moving.is_empty())
+    });
+    if moving || !s.data_moving.is_empty() {
+        return;
+    }
+    let current = if s.data_on_sd2(category) { "sd2" } else { "sd1" };
+    open_settings_choice(ui, &format!("sd2-data:{category}"), &data_title(ui, category),
+        vec![("sd1".to_owned(), tr(ui, 912, "SD1")), ("sd2".to_owned(), tr(ui, 64, "SD2"))], current);
 }
 
 /* Confirm on a row of Backup or on Restore from Backup of Recovery; false
@@ -690,7 +807,7 @@ pub fn backup_confirm(ui: &HomeWindow, key: &str) -> bool {
     true
 }
 
-/* Input on pages 64 and 59 (gameui::handle_page); 62 is filesui's. */
+/* Input on pages 64, 59 and 75 (gameui::handle_page); 62 is filesui's. */
 pub fn handle_page(ui: &HomeWindow, view: i32, action: &str) {
     match action {
         "menu_up" | "menu_down" => {
@@ -700,10 +817,15 @@ pub fn handle_page(ui: &HomeWindow, view: i32, action: &str) {
         "menu_back" => {
             if view == CONTENT_VIEW {
                 crate::filesui::open_backup_at(ui, "sd2-content");
+            } else if view == DATA_VIEW {
+                open(ui);
+                crate::gameui::focus(ui, "data");
+                render(ui);
             } else {
                 navigate_settings_view(ui, 19);
             }
         }
+        "menu_confirm" if view == DATA_VIEW => data_confirm(ui, &focused_key(ui)),
         "menu_confirm" => confirm(ui, view, &focused_key(ui)),
         _ => {}
     }
@@ -765,6 +887,29 @@ pub fn apply_choice(ui: &HomeWindow, context: &str, value: String) {
             }
         }
         "sd2-oob-restore" if value != "scratch" => start_restore(ui, value, String::new()),
+        _ if context.starts_with("sd2-data:") => {
+            let category = &context["sd2-data:".len()..];
+            let s = STATE.with(|st| st.borrow().storage.clone());
+            let on = s.data_on_sd2(category);
+            if (value == "sd2") == on {
+                return;
+            }
+            if value == "sd2" && s.state != "ready" {
+                notice(ui, tr(ui, 81, "Insert SD2"));
+            } else if value == "sd1" && s.data_state != "online" {
+                /* The card is gone: back on SD1 without what it holds. */
+                open_settings_choice(ui, &format!("sd2-data-forget:{category}"),
+                    &tr(ui, 1440, "Use SD1 without the card's data?"),
+                    vec![("forget".to_owned(), tr(ui, 1441, "Use SD1")), ("cancel".to_owned(), tr(ui, 619, "Cancel"))],
+                    "cancel");
+            } else {
+                start_data_move(ui, category, &value);
+            }
+        }
+        _ if context.starts_with("sd2-data-forget:") && value == "forget" => {
+            let category = context["sd2-data-forget:".len()..].to_owned();
+            system(ui, vec!["storage-data-forget".into(), category], |_, _| {});
+        }
         _ => {}
     }
 }

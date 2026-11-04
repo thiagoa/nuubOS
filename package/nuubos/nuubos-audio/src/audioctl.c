@@ -22,6 +22,8 @@ static void usage(const char *argv0)
 		"  %s volume speaker|headphones|bluetooth|hdmi\n"
 		"  %s volume speaker|headphones|bluetooth 0..100\n"
 		"  %s volume adjust -100..100\n"
+		"  %s volume-step [1|2|5|10]\n"
+		"  %s volume-key up|down\n"
 		"  %s system-volume [0..100|adjust DELTA]\n"
 		"  %s home-music-volume [0..100|adjust DELTA]\n"
 		"  %s music start|stop|next\n"
@@ -30,7 +32,7 @@ static void usage(const char *argv0)
 		"  %s reset-defaults\n"
 		"  %s lifecycle park|resume\n",
 		argv0, argv0, argv0, argv0, argv0, argv0, argv0, argv0,
-		argv0, argv0, argv0, argv0, argv0, argv0, argv0);
+		argv0, argv0, argv0, argv0, argv0, argv0, argv0, argv0, argv0);
 }
 
 static int connect_daemon(void)
@@ -76,6 +78,13 @@ int main(int argc, char **argv)
 			 "OUTPUT SET %s", argv[2]);
 	} else if (argc == 2 && strcmp(argv[1], "volume") == 0) {
 		snprintf(command, sizeof(command), "VOLUME GET");
+	} else if (argc == 3 && strcmp(argv[1], "volume-step") == 0) {
+		snprintf(command, sizeof(command), "VOLUME STEP SET %s", argv[2]);
+	} else if (argc == 2 && strcmp(argv[1], "volume-step") == 0) {
+		snprintf(command, sizeof(command), "VOLUME STEP GET");
+	} else if (argc == 3 && strcmp(argv[1], "volume-key") == 0) {
+		snprintf(command, sizeof(command), "VOLUME KEY %s",
+			 strcmp(argv[2], "up") == 0 ? "UP" : "DOWN");
 	} else if (argc == 3 && strcmp(argv[1], "volume") == 0) {
 		snprintf(command, sizeof(command),
 			 "VOLUME GET %s", argv[2]);

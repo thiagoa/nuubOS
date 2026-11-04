@@ -31,6 +31,7 @@
 #include <ctype.h>
 #include <dirent.h>
 #include <errno.h>
+#include <ftw.h>
 #include <fcntl.h>
 #include <limits.h>
 #include <poll.h>
@@ -75,7 +76,9 @@
 /* This console's identity among the user's consoles (created once). */
 #define CONSOLE_ID_FILE STATE_ROOT "/config/console-id"
 /* Library view of the console (device setting): SHOW_UNAVAILABLE=1 lists
- * games whose file is gone or on a games card that is not inserted. */
+ * games whose file is gone or on a games card that is not inserted;
+ * WRAP_ROWS=1 makes Home's rows go round from the last item to the first
+ * (GitHub #28, on by default: user decision 2026-10-29). */
 #define LIBRARY_CONFIG STATE_ROOT "/config/nuubos-library.conf"
 #define ACTIVE_DIR RUN_ROOT "/user"
 #define ACTIVE_FILE ACTIVE_DIR "/active"
@@ -273,6 +276,7 @@ static long long boot_scan_deadline_ms;
 /* Unavailable games in the lists (off by default, user request 2026-10-20:
  * they cluttered the library). Search, counts and previews never had them. */
 static bool show_unavailable;
+static bool wrap_rows = true;
 
 /* Games added or available again since the last SCAN request found idle. */
 static size_t scan_new;
@@ -388,6 +392,8 @@ static const char *rel_name(const char *rel)
 	return rel_on_sd2(rel) ? rel + SD2_PREFIX_LEN : rel;
 }
 
+static const char *rom_name(const char *rel);
+
 /*
  * Fast discovery identity (EPIC-012): system + file name + size. Moving a
  * ROM to another folder keeps its identity (and the users' history);
@@ -397,7 +403,7 @@ static void game_id_for(int sys, const char *rel, long long size, char out[17])
 {
 	char key[600];
 
-	snprintf(key, sizeof(key), "%s\x1f%lld", rel_name(rel), size);
+	snprintf(key, sizeof(key), "%s\x1f%lld", rom_name(rel), size);
 	snprintf(out, 17, "%016llx",
 		 (unsigned long long)fnv1a64(systems[sys].id, key));
 }
@@ -708,6 +714,49 @@ static int system_by_folder(const char *name)
 	return -1;
 }
 
+/*
+ * Where the ROM's name starts in rel. A game in a folder of its own
+ * (GitHub #30: PSP homebrew and PSN games, "<Folder>/EBOOT.PBP") is named
+ * after the folder, unless the folder is a system's: every such game is
+ * called EBOOT, and its covers, metadata and identity would collide.
+ */
+static const char *rom_name(const char *rel)
+{
+	const char *name = rel_name(rel);
+	const char *start;
+	char parent[NAME_MAX + 1];
+	size_t len;
+
+	if (strcasecmp(name, "EBOOT.PBP") || name == rel || name[-1] != '/')
+		return name;
+	start = name - 1;
+	while (start > rel && start[-1] != '/' && start[-1] != ':')
+		start--;
+	len = (size_t)(name - 1 - start);
+	if (!len || len >= sizeof(parent))
+		return name;
+	memcpy(parent, start, len);
+	parent[len] = '\0';
+	return system_by_folder(parent) < 0 ? start : name;
+}
+
+/* The ROM's name without extension: covers, metadata, scraper. */
+static void rom_stem(const char *rel, char *out, size_t size)
+{
+	const char *name = rom_name(rel);
+	const char *slash = strchr(name, '/');
+	char *dot;
+
+	if (slash) {
+		snprintf(out, size, "%.*s", (int)(slash - name), name);
+		return;
+	}
+	copy_text(out, size, name);
+	dot = strrchr(out, '.');
+	if (dot && dot != out)
+		*dot = '\0';
+}
+
 static const char *extension_of(const char *name)
 {
 	const char *dot = strrchr(name, '.');
@@ -795,7 +844,9 @@ static char *title_from_rel(int sys, const char *rel)
 
 	copy_text(stem, sizeof(stem), rel_name(rel));
 	ext_len = system_extension_len(sys, stem);
-	if (ext_len) {
+	if (rom_name(rel) != rel_name(rel)) {
+		rom_stem(rel, stem, sizeof(stem));
+	} else if (ext_len) {
 		stem[strlen(stem) - ext_len - 1] = '\0';
 	} else {
 		dot = strrchr(stem, '.');
@@ -1103,13 +1154,61 @@ static int sniff_system(const char *rel)
 
 /*
  * PortMaster ports (EPIC-058): the scripts directly in roms/ports of the
- * console's own card, the only folder nuubos-portsd's sandbox sees. The
- * folder of a port beside its script holds the port's data (archives,
- * images, its own runtimes), never games, so the scan does not enter it.
+ * console's own card, or of the SD2 card when the user chose it on the
+ * PortMaster page (GitHub #21, portsd's /state/ports/location.conf): the
+ * only folder nuubos-portsd's sandbox sees. The folder of a port beside its
+ * script holds the port's data (archives, images, its own runtimes), never
+ * games, so the scan does not enter it.
  */
 #define PORTS_SYSTEM "ports"
 static bool regular_file(const char *path);
-#define PORTS_ROOT ROMS_ROOT "/ports"
+#define PORTS_LOCATION_FILE STATE_ROOT "/ports/location.conf"
+/* The ports folder (portsd asks for it in STATUS), "" while it is on an
+ * SD2 card that is out, and its catalog folder ("ports" or "sd2:<name>").
+ * Written by the main thread only while no scan runs, as sd2_roms. */
+static char ports_root[PATH_MAX];
+static char ports_rel[PATH_MAX] = "ports";
+static bool ports_sd2;
+/* The SD2 card's ports folder whatever the setting ("" without the card):
+ * where the PortMaster page's switch moves them. */
+static char sd2_ports[PATH_MAX];
+
+static void refresh_ports_root(void)
+{
+	char line[64], name[NAME_MAX + 1] = "ports";
+	FILE *fp = fopen(PORTS_LOCATION_FILE, "r");
+
+	ports_sd2 = false;
+	sd2_ports[0] = '\0';
+	if (fp) {
+		while (fgets(line, sizeof(line), fp))
+			if (!strncmp(line, "LOCATION=sd2", 12))
+				ports_sd2 = true;
+		fclose(fp);
+	}
+	ports_root[0] = '\0';
+	if (sd2_roms[0]) {
+		/* Its own spelling on the card (ports, PORTS, Ports). */
+		DIR *dir = opendir(sd2_roms);
+		struct dirent *de;
+
+		while (dir && (de = readdir(dir)) != NULL)
+			if (!strcasecmp(de->d_name, "ports")) {
+				copy_text(name, sizeof(name), de->d_name);
+				break;
+			}
+		if (dir)
+			closedir(dir);
+		pathf(sd2_ports, sizeof(sd2_ports), "%s/%s", sd2_roms, name);
+	}
+	if (!ports_sd2) {
+		copy_text(ports_root, sizeof(ports_root), ROMS_ROOT "/ports");
+		copy_text(ports_rel, sizeof(ports_rel), "ports");
+		return;
+	}
+	copy_text(ports_root, sizeof(ports_root), sd2_ports);
+	pathf(ports_rel, sizeof(ports_rel), SD2_PREFIX "%s", name);
+}
 
 static bool is_ports(int sys)
 {
@@ -1192,7 +1291,7 @@ static struct port_info *load_port_infos(size_t *count)
 {
 	struct port_info *list = NULL;
 	size_t cap = 0;
-	DIR *dir = opendir(PORTS_ROOT);
+	DIR *dir = ports_root[0] ? opendir(ports_root) : NULL;
 	struct dirent *de;
 
 	*count = 0;
@@ -1207,9 +1306,8 @@ static struct port_info *load_port_infos(size_t *count)
 
 		if (de->d_name[0] == '.')
 			continue;
-		if (!strcmp(de->d_name, "gamelist.xml"))
-			snprintf(path, sizeof(path), PORTS_ROOT "/gamelist.xml");
-		else if (!pathf(path, sizeof(path), PORTS_ROOT "/%s/gameinfo.xml", de->d_name))
+		if (!pathf(path, sizeof(path), !strcmp(de->d_name, "gamelist.xml") ? "%s/gamelist.xml" : "%s/%s/gameinfo.xml",
+			   ports_root, de->d_name))
 			continue;
 		if (!(fp = fopen(path, "r")))
 			continue;
@@ -1231,7 +1329,7 @@ static struct port_info *load_port_infos(size_t *count)
 				if (image && !strncmp(image, "./", 2) && !strstr(image, "..") && tsv_safe(image)) {
 					char full[PATH_MAX];
 
-					if (pathf(full, sizeof(full), PORTS_ROOT "/%s", image + 2) && regular_file(full))
+					if (pathf(full, sizeof(full), "%s/%s", ports_root, image + 2) && regular_file(full))
 						info.image = xstrdup(full);
 				}
 				free(image);
@@ -1317,16 +1415,12 @@ static bool regular_file(const char *path)
 static char *find_cover(int sys, const char *rel)
 {
 	static const char *const exts[] = { "png", "jpg", "jpeg", NULL };
-	const char *name = rel_name(rel);
+	const char *name = rom_name(rel);
 	char stem[512];
 	char cover_rel[PATH_MAX];
 	char path[PATH_MAX];
-	char *dot;
 
-	copy_text(stem, sizeof(stem), name);
-	dot = strrchr(stem, '.');
-	if (dot && dot != stem)
-		*dot = '\0';
+	rom_stem(rel, stem, sizeof(stem));
 	for (int i = 0; exts[i]; i++)
 		if (pathf(path, sizeof(path), COVERS_ROOT "/%s/%s.%s", systems[sys].id, stem, exts[i]) &&
 		    regular_file(path))
@@ -1343,14 +1437,17 @@ static char *find_cover(int sys, const char *rel)
 /*
  * The system of a file: its nearest folder named after a system when that
  * system takes the file, else the only system taking its extension, else a
- * header sniff for shared disc/cartridge formats.
+ * header sniff for shared disc/cartridge formats. A file in a system's
+ * folder that the system does not take is none: the data of a game in
+ * another format (GitHub #31: the .col stages of a PSP port were listed as
+ * ColecoVision games).
  */
 static int classify(const char *rel, const char *name, int folder_sys)
 {
 	int sys;
 
-	if (folder_sys >= 0 && system_accepts(folder_sys, name))
-		return folder_sys;
+	if (folder_sys >= 0)
+		return system_accepts(folder_sys, name) ? folder_sys : -1;
 	sys = system_by_extension(name);
 	if (sys >= 0)
 		return sys;
@@ -1419,7 +1516,7 @@ static void walk(struct scan_ctx *ctx, const char *sub, int depth, int folder_sy
 			ref_add(&ctx->unclassified, rel);
 			continue;
 		}
-		if (is_ports(sys) && strcasecmp(sub, systems[sys].dir))
+		if (is_ports(sys) && strcasecmp(sub, ports_rel))
 			continue; /* a script anywhere else is not a port */
 		if (ctx->out->count == ctx->out->cap) {
 			ctx->out->cap = ctx->out->cap ? ctx->out->cap * 2 : 256;
@@ -1446,13 +1543,9 @@ static void read_meta_index(struct scan_item *it)
 	char stem[512];
 	char path[PATH_MAX];
 	char line[1024];
-	char *dot;
 	FILE *fp;
 
-	copy_text(stem, sizeof(stem), rel_name(it->rel));
-	dot = strrchr(stem, '.');
-	if (dot && dot != stem)
-		*dot = '\0';
+	rom_stem(it->rel, stem, sizeof(stem));
 	if (!pathf(path, sizeof(path), METADATA_ROOT "/%s/%s.txt", systems[it->sys].id, stem))
 		return;
 	fp = fopen(path, "r");
@@ -1555,7 +1648,7 @@ static void *scan_main(void *arg)
 		free(ctx.refs.items[i]);
 	free(ctx.refs.items);
 	if (skipped)
-		log_msg("scan: %zu files with a shared format outside a system folder were skipped",
+		log_msg("scan: %zu files no system takes there were skipped (shared format outside a system folder, or another system's file in one)",
 			skipped);
 	scan_output = ctx.out;
 	while (write(scan_pipe[1], &byte, 1) < 0 && errno == EINTR)
@@ -1689,6 +1782,31 @@ static void load_catalog(void)
  */
 static bool referenced_elsewhere(const char *rel, const struct game *self);
 
+/* A file in a system's folder that this system does not take (classify):
+ * an entry of an older scan that is no game (GitHub #31). */
+static bool outside_its_folder(const char *rel)
+{
+	char dir[PATH_MAX];
+	const char *name;
+	char *save = NULL;
+	int folder_sys = -1;
+
+	if (!strncmp(rel, SD2_PREFIX, strlen(SD2_PREFIX)))
+		rel += strlen(SD2_PREFIX);
+	name = strrchr(rel, '/');
+	if (!name || (size_t)(name - rel) >= sizeof(dir))
+		return false;
+	memcpy(dir, rel, (size_t)(name - rel));
+	dir[name - rel] = '\0';
+	for (char *part = strtok_r(dir, "/", &save); part; part = strtok_r(NULL, "/", &save)) {
+		int here = system_by_folder(part);
+
+		if (here >= 0)
+			folder_sys = here;
+	}
+	return folder_sys >= 0 && !system_accepts(folder_sys, name + 1);
+}
+
 static bool reconcile(struct scan_result *scan)
 {
 	size_t added = 0, back = 0, gone = 0, changed = 0, duplicates = 0, absorbed = 0;
@@ -1769,10 +1887,10 @@ static bool reconcile(struct scan_result *scan)
 		char path[PATH_MAX];
 
 		/* Its file is still there but now belongs to another game (a
-		 * disc of a set, a file a playlist lists): the entry goes
-		 * rather than staying unavailable. */
+		 * disc of a set, a file a playlist lists) or to no system: the
+		 * entry goes rather than staying unavailable. */
 		if (!g->seen && rom_path(path, sizeof(path), g->rel) && regular_file(path) &&
-		    referenced_elsewhere(g->rel, g)) {
+		    (referenced_elsewhere(g->rel, g) || outside_its_folder(g->rel))) {
 			free(g->rel);
 			free(g->title);
 			free(g->cover);
@@ -1813,6 +1931,7 @@ static void start_scan(void)
 		return;
 	}
 	refresh_sd2_root();
+	refresh_ports_root();
 	if (pthread_create(&scan_thread, NULL, scan_main, NULL) != 0) {
 		log_msg("scan thread failed: %s", strerror(errno));
 		return;
@@ -2129,11 +2248,15 @@ static void load_library_config(void)
 	FILE *fp = fopen(LIBRARY_CONFIG, "r");
 
 	show_unavailable = false;
+	wrap_rows = true;
 	if (!fp)
 		return;
-	while (fgets(line, sizeof(line), fp))
+	while (fgets(line, sizeof(line), fp)) {
 		if (!strncmp(line, "SHOW_UNAVAILABLE=", 17))
 			show_unavailable = atoi(line + 17) != 0;
+		else if (!strncmp(line, "WRAP_ROWS=", 10))
+			wrap_rows = atoi(line + 10) != 0;
+	}
 	fclose(fp);
 }
 
@@ -2142,7 +2265,8 @@ static int save_library_config(void)
 	char text[64];
 
 	mkdir_p(STATE_ROOT "/config");
-	snprintf(text, sizeof(text), "SHOW_UNAVAILABLE=%d\n", show_unavailable ? 1 : 0);
+	snprintf(text, sizeof(text), "SHOW_UNAVAILABLE=%d\nWRAP_ROWS=%d\n", show_unavailable ? 1 : 0,
+		 wrap_rows ? 1 : 0);
 	return write_atomic(LIBRARY_CONFIG, text, strlen(text));
 }
 
@@ -2536,11 +2660,14 @@ static void build_status(struct strbuf *b)
 		available++;
 		per_system[games[i].sys]++;
 	}
-	sb_append(b, "user=%s\nscanning=%d\ngames=%zu\nscan_new=%zu\nshow_unavailable=%d\n", active_user,
-		  scanning ? 1 : 0, available, scan_new, show_unavailable ? 1 : 0);
+	sb_append(b, "user=%s\nscanning=%d\ngames=%zu\nscan_new=%zu\nshow_unavailable=%d\nwrap_rows=%d\n",
+		  active_user, scanning ? 1 : 0, available, scan_new, show_unavailable ? 1 : 0, wrap_rows ? 1 : 0);
 	/* Where new games go (Web administration uploads): the games card
 	 * while it can be written, else USERDATA. */
 	sb_append(b, "games_root=%s\n", sd2_writable ? sd2_roms : ROMS_ROOT);
+	/* The ports folder nuubos-portsd runs (GitHub #21): "" while the SD2
+	 * card it is on is out. */
+	sb_append(b, "ports_location=%s\nports_root=%s\n", ports_sd2 ? "sd2" : "console", ports_root);
 	if (active_user[0]) {
 		append_recent(b, "recent", RECENT_LIMIT);
 		/* Favorites of an older nuubOS wait for the UI to name the
@@ -2856,16 +2983,6 @@ static void build_filters(struct strbuf *b)
 /* Game Details and Delete Game                                       */
 /* ------------------------------------------------------------------ */
 
-static void rom_stem(const char *rel, char *out, size_t size)
-{
-	char *dot;
-
-	copy_text(out, size, rel_name(rel));
-	dot = strrchr(out, '.');
-	if (dot && dot != out)
-		*dot = '\0';
-}
-
 /*
  * Provider-neutral metadata (EPIC-015): one "key=value" per line, values on
  * one line ("\n" escaped by the writer). Unknown keys are passed through as
@@ -2978,6 +3095,28 @@ static void append_metadata(struct strbuf *b, const struct game *g)
 	fclose(fp);
 }
 
+/* The catalog path of a "<Folder>/EBOOT.PBP" game's folder (rom_name). */
+static bool game_folder(const char *rel, char *out, size_t size)
+{
+	const char *name = rel_name(rel);
+
+	if (rom_name(rel) == name)
+		return false;
+	snprintf(out, size, "%.*s", (int)(name - 1 - rel), rel);
+	return true;
+}
+
+/* Another catalog game inside that folder (then only the EBOOT goes). */
+static bool folder_shared(const struct game *self, const char *folder)
+{
+	size_t len = strlen(folder);
+
+	for (size_t i = 0; i < game_count; i++)
+		if (&games[i] != self && !strncmp(games[i].rel, folder, len) && games[i].rel[len] == '/')
+			return true;
+	return false;
+}
+
 static void build_details(struct strbuf *b, const struct game *g)
 {
 	const struct history_entry *h = history_for(g->id, false);
@@ -2987,6 +3126,12 @@ static void build_details(struct strbuf *b, const struct game *g)
 	append_game(b, "game", g);
 	sb_append(b, "system_name=%s\nsessions=%d\npath=%s\nsize=%lld\nadded=%lld\n",
 		  systems[g->sys].name, h ? hist_sessions(h) : 0, g->rel, g->size, g->added);
+	/* The ROM's name for covers and metadata (rom_stem). */
+	rom_stem(g->rel, file, sizeof(file));
+	sb_append(b, "name=%s\n", file);
+	/* Delete Game removes the whole folder (delete_game). */
+	if (game_folder(g->rel, file, sizeof(file)) && !folder_shared(g, file))
+		sb_append(b, "folder=1\n");
 	/* Absolute file and the ROM folder of its card, while the card is there. */
 	if (rom_path(file, sizeof(file), g->rel))
 		sb_append(b, "file=%s\nroot=%s\n", file,
@@ -3028,6 +3173,18 @@ static bool referenced_elsewhere(const char *rel, const struct game *self)
  * or on a games card that is not inserted) loses only its library entry,
  * cover and metadata: no file is touched (user request 2026-10-20).
  */
+static int remove_entry(const char *path, const struct stat *st, int flag, struct FTW *ftw)
+{
+	(void)st;
+	(void)flag;
+	(void)ftw;
+	if (remove(path) != 0 && errno != ENOENT) {
+		log_msg("delete %s: %s", path, strerror(errno));
+		return -1;
+	}
+	return 0;
+}
+
 static const char *delete_game(long idx)
 {
 	static char owned[128][PATH_MAX];
@@ -3040,6 +3197,21 @@ static const char *delete_game(long idx)
 
 	if (!g->available)
 		goto entry;
+	/* A game in a folder of its own (GitHub #30, user 2026-10-30): the
+	 * whole folder, its data beside the EBOOT.PBP included. Never another
+	 * system's folder, a mount point below it, or a folder holding other
+	 * games of the catalog. */
+	{
+		char folder[PATH_MAX];
+
+		if (game_folder(g->rel, folder, sizeof(folder)) && !folder_shared(g, folder)) {
+			if (!rom_path(path, sizeof(path), folder) ||
+			    nftw(path, remove_entry, 16, FTW_DEPTH | FTW_PHYS | FTW_MOUNT) != 0)
+				return "io";
+			sync();
+			goto entry;
+		}
+	}
 	/* .m3u -> discs (.cue) -> tracks (.bin): two descriptor levels. */
 	n = top = descriptor_entries(g->rel, owned, 64);
 	for (size_t i = 0; i < top; i++) {
@@ -3169,6 +3341,10 @@ static void handle_command(struct client *c, char *line)
 		show_unavailable = arg[0] == '1';
 		reply(c, save_library_config() ? "ERR persistence\n" : "OK\n");
 		notify_all();
+	} else if (!strcmp(line, "WRAP_ROWS") && arg && (!strcmp(arg, "0") || !strcmp(arg, "1"))) {
+		wrap_rows = arg[0] == '1';
+		reply(c, save_library_config() ? "ERR persistence\n" : "OK\n");
+		notify_all();
 	} else if (!strcmp(line, "SCAN")) {
 		if (!scanning)
 			scan_new = 0;
@@ -3183,6 +3359,20 @@ static void handle_command(struct client *c, char *line)
 			send_text(c, b.data, b.len);
 		else
 			reply(c, "ERR scope\n");
+		free(b.data);
+	} else if (!strcmp(line, "PORTS_ROOT")) {
+		/* nuubos-portsd, before a session or a PortMaster job (GitHub
+		 * #21): the ports folder now ("" while its SD2 card is out) and
+		 * the SD2 card's ports folder ("" without the card). Not re-read
+		 * during a scan (the scan thread reads it). */
+		struct strbuf b = { 0 };
+
+		if (!scanning) {
+			refresh_sd2_root();
+			refresh_ports_root();
+		}
+		sb_append(&b, "OK %s\t%s\t%s\n", ports_sd2 ? "sd2" : "console", ports_root, sd2_ports);
+		send_text(c, b.data, b.len);
 		free(b.data);
 	} else if (!strcmp(line, "RESOLVE") && arg) {
 		/* Launch lookup for the Emulation Service: system and
@@ -3236,6 +3426,16 @@ static void handle_command(struct client *c, char *line)
 		struct strbuf b = { 0 };
 
 		build_filters(&b);
+		send_text(c, b.data, b.len);
+		free(b.data);
+	} else if (!strcmp(line, "SYSTEMS")) {
+		/* Every system of the registry, with or without games (Game
+		 * Details: Search System, GitHub #29). */
+		struct strbuf b = { 0 };
+
+		for (int i = 0; i < system_count; i++)
+			sb_append(&b, "system=%s\t%s\n", systems[i].id, systems[i].name);
+		sb_append(&b, "end=1\n");
 		send_text(c, b.data, b.len);
 		free(b.data);
 	} else if (!active_user[0] &&
@@ -3603,6 +3803,7 @@ int main(void)
 	if (ui_wd >= 0) {
 		/* Games on the games card launch before the scan too. */
 		refresh_sd2_root();
+		refresh_ports_root();
 		boot_scan_pending = true;
 		boot_scan_deadline_ms = monotonic_ms() + BOOT_SCAN_WAIT_MS;
 	} else {

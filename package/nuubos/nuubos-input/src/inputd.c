@@ -1838,6 +1838,12 @@ static const struct game_hotkey default_game_hotkeys[GAME_HOTKEY_COUNT] = {
 	{ PAD_R2, "stylus" },
 };
 static struct game_hotkey game_hotkeys[GAME_HOTKEY_COUNT];
+
+/* Controls of the running game (REMAP from the gamepad owner, user request
+ * 2026-10-29): the game pad control each controller control drives, -1 =
+ * none. Identity outside a game's session; chords stay physical. */
+static int game_remap[PAD_AXIS_FIRST];
+static void reset_game_remap(void);
 /* Chord controls held through an axis (hat D-pad, analog trigger): edge
  * detection while the modifier is held. */
 static bool hotkey_axis_down[PAD_CONTROL_COUNT];
@@ -2223,11 +2229,13 @@ static void vpad_release(struct vpad *pad)
 
 	vpad_ff_stop(pad);
 	for (c = 0; c < PAD_CONTROL_COUNT; c++) {
+		int target = c < PAD_AXIS_FIRST ? game_remap[c] : -1;
+
 		if (!pad->pressed[c])
 			continue;
 		pad->pressed[c] = false;
-		if (pad_controls[c].code >= 0 && c < PAD_AXIS_FIRST)
-			vpad_write(pad, EV_KEY, pad_controls[c].code, 0);
+		if (target >= 0 && pad_controls[target].code >= 0)
+			vpad_write(pad, EV_KEY, pad_controls[target].code, 0);
 	}
 	for (a = 0; a < 4; a++) {
 		pad->raw[a] = 0;
@@ -2423,6 +2431,8 @@ static void set_gamepads(bool enabled)
 	pad_inject = 0;
 	hotkey_held = false;
 	hotkey_used = false;
+	/* Every session starts with its controls as they are (REMAP). */
+	reset_game_remap();
 	log_message("gamepads %s", enabled ? "on" : "off");
 	if (enabled)
 		sync_vpads();
@@ -2510,26 +2520,43 @@ static bool vpad_injected(const struct vpad *pad, size_t c)
 	       (code == BTN_NORTH && (pad_inject & PADPRESS_NORTH));
 }
 
+/* Whether a control of the controller drives the game pad control t. */
+static bool vpad_out(const struct vpad *pad, int t)
+{
+	for (size_t c = 0; c < PAD_AXIS_FIRST; c++)
+		if (game_remap[c] == t && pad->pressed[c])
+			return true;
+	return false;
+}
+
 /* Whether the controller itself holds the button emitted as `code`. */
 static bool vpad_held(const struct vpad *pad, int code)
 {
 	size_t c;
 
 	for (c = 0; c < PAD_AXIS_FIRST; c++)
-		if (pad_controls[c].code == code && pad->pressed[c])
+		if (pad_controls[c].code == code && vpad_out(pad, (int)c))
 			return true;
 	return false;
 }
 
+/* Control c of the controller pressed or released: the game pad control
+ * it drives (game_remap) follows every control bound to it. */
 static void vpad_set_button(struct vpad *pad, size_t c, bool pressed)
 {
+	int t;
+
 	if (pad->pressed[c] == pressed)
 		return;
 	pad->pressed[c] = pressed;
+	t = c < PAD_AXIS_FIRST ? game_remap[c] : -1;
+	if (t < 0)
+		return;
+	pressed = vpad_out(pad, t);
 
-	if (c >= PAD_UP && c <= PAD_RIGHT) {
-		int x = (pad->pressed[PAD_RIGHT] ? 1 : 0) - (pad->pressed[PAD_LEFT] ? 1 : 0);
-		int y = (pad->pressed[PAD_DOWN] ? 1 : 0) - (pad->pressed[PAD_UP] ? 1 : 0);
+	if (t >= PAD_UP && t <= PAD_RIGHT) {
+		int x = (vpad_out(pad, PAD_RIGHT) ? 1 : 0) - (vpad_out(pad, PAD_LEFT) ? 1 : 0);
+		int y = (vpad_out(pad, PAD_DOWN) ? 1 : 0) - (vpad_out(pad, PAD_UP) ? 1 : 0);
 
 		if (x != pad->hat_x) {
 			pad->hat_x = x;
@@ -2541,9 +2568,9 @@ static void vpad_set_button(struct vpad *pad, size_t c, bool pressed)
 		}
 		return;
 	}
-	if (pad_controls[c].code >= 0)
-		vpad_write(pad, EV_KEY, pad_controls[c].code,
-			   pressed || vpad_injected(pad, c) ? 1 : 0);
+	if (pad_controls[t].code >= 0)
+		vpad_write(pad, EV_KEY, pad_controls[t].code,
+			   pressed || vpad_injected(pad, (size_t)t) ? 1 : 0);
 }
 
 /* PADPRESS <hex>: the buttons player 1 holds from now on, on top of the
@@ -2637,13 +2664,16 @@ static bool game_hotkey_event(const struct input_dev *input,
 
 	if (!hotkey_held || !map)
 		return false;
-	if ((ev->type != EV_KEY && ev->type != EV_ABS) || web_on)
+	if (ev->type != EV_KEY && ev->type != EV_ABS)
 		return true;
 	for (i = 0; i < GAME_HOTKEY_COUNT; i++) {
 		enum pad_control c = game_hotkeys[i].control;
 		const struct pad_source *src = &map->src[c];
 		bool fire = false;
 
+		/* Browser and terminal: only Quit closes them like a game. */
+		if (web_on && strcmp(game_hotkeys[i].action, "quit") != 0)
+			continue;
 		if (src->code < 0 || src->code != ev->code)
 			continue;
 		if (ev->type == EV_KEY && src->is_key) {
@@ -2698,6 +2728,46 @@ static void set_game_hotkeys(const char *spec)
 		}
 	}
 	log_message("game-hotkeys %s", spec);
+}
+
+static int pad_control_named(const char *name)
+{
+	for (int c = 0; c < PAD_AXIS_FIRST; c++)
+		if (c != PAD_MODE && strcmp(pad_controls[c].name, name) == 0)
+			return c;
+	return -2;
+}
+
+static void reset_game_remap(void)
+{
+	for (int c = 0; c < PAD_AXIS_FIRST; c++)
+		game_remap[c] = c == PAD_MODE ? -1 : c;
+}
+
+/* REMAP <control>:<target|none>,...: the game's Controls from the gamepad
+ * owner; nothing listed = every control is itself. Held buttons are
+ * released first (their targets change). */
+static void set_game_remap(const char *spec)
+{
+	char copy[512];
+	char *save = NULL;
+
+	release_all_vpads();
+	reset_game_remap();
+	snprintf(copy, sizeof(copy), "%s", spec);
+	for (char *item = strtok_r(copy, ", ", &save); item; item = strtok_r(NULL, ", ", &save)) {
+		char *colon = strchr(item, ':');
+		int c, target;
+
+		if (!colon)
+			continue;
+		*colon++ = '\0';
+		c = pad_control_named(item);
+		target = strcmp(colon, "none") ? pad_control_named(colon) : -1;
+		if (c >= 0 && target >= -1)
+			game_remap[c] = target;
+	}
+	log_message("game-remap %s", spec);
 }
 
 /*
@@ -3352,6 +3422,12 @@ static void handle_command(struct client *client, const char *line)
 		if (!gamepads_on)
 			vpad_guide = line[11] != '\0';
 		set_gamepads(true);
+		(void)write_all(client->fd, "OK\n");
+		return;
+	}
+
+	if ((strcmp(line, "REMAP") == 0 || strncmp(line, "REMAP ", 6) == 0) && client->owns_gamepads) {
+		set_game_remap(line[5] ? line + 6 : "");
 		(void)write_all(client->fd, "OK\n");
 		return;
 	}
@@ -4109,6 +4185,7 @@ int main(int argc, char **argv)
 		return 2;
 	}
 	reset_game_hotkeys();
+	reset_game_remap();
 
 	if (mkdir("/run/nuubos", 0755) != 0 && errno != EEXIST) {
 		perror("nuubos-inputd: mkdir /run/nuubos");

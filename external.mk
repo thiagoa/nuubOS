@@ -52,3 +52,10 @@ COG_CONF_OPTS += -Dcog_dbus_system_owner=root
 # rtl_bt Bluetooth firmware, binary-only but redistributable (WHENCE).
 DEJAVU_LICENSE = Bitstream-Vera, Public-Domain (DejaVu changes), Arev fonts license
 LINUX_FIRMWARE_LICENSE = Redistributable binary firmware (LICENCE.rtlwifi_firmware.txt)
+
+# Mesa (Panfrost, the GL path of every core and of the UI) at -O3 with LTO:
+# Buildroot's -O2 (BR2_OPTIMIZE_2) otherwise overrides meson's buildtype
+# (docs/dev/perf-power.md 5.1). The later -O3 wins.
+MESA3D_CFLAGS += -O3
+MESA3D_CXXFLAGS += -O3
+MESA3D_CONF_OPTS += -Db_lto=true

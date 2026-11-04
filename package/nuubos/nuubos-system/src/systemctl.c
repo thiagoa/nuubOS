@@ -58,7 +58,7 @@ int main(int argc, char **argv)
                 "set-diagnostics <0-20 boots> | "
                 "storage-changed | set-storage-backup <0|1> | set-storage-backup-item <item> <0|1> | "
                 "set-storage-backup-dest <sd2|sd1|usb> | "
-                "sd2 <eject|ignore|use> | storage-backup-archive | "
+                "sd2 <eject|ignore|use> | storage-backup-archive | storage-data-forget <category> | "
                 "sleep | restart | poweroff | activity | reset-system-settings\n");
         close(fd);
         return 2;
@@ -99,7 +99,9 @@ int main(int argc, char **argv)
         for (char *p = value; *p; p++)
             *p = (char)(*p - 'a' + 'A');
         snprintf(command, sizeof(command), "STORAGE SD2 %s\n", value);
-    } else if (!strcmp(argv[1], "storage-backup-archive") && argc == 2)
+    } else if (!strcmp(argv[1], "storage-data-forget") && argc == 3)
+        snprintf(command, sizeof(command), "STORAGE DATA FORGET %.15s\n", argv[2]);
+    else if (!strcmp(argv[1], "storage-backup-archive") && argc == 2)
         snprintf(command, sizeof(command), "STORAGE BACKUP ARCHIVE\n");
     else if (!strcmp(argv[1], "sleep") && argc == 2)
         snprintf(command, sizeof(command), "ACTION SLEEP\n");
