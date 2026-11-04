@@ -6,7 +6,8 @@
  * Usage: uinput-nav [pattern] [interval_ms] [repeat]
  *   pattern: R L U D (D-pad), A (south), B (east), N (north), W (west),
  *            S (start), E (select), M (mode: Quick Menu), + - (volume
- *            up/down), [ ] (L1/R1), any other char = pause;
+ *            up/down), [ ] (L1/R1), Q (Mode + Start chord: quit),
+ *            any other char = pause;
  *            default "RRRRLLLLDUDU"; "@" = persistent pad, sequences
  *            "PATTERN INTERVAL_MS" read from stdin, one per line"
  */
@@ -61,7 +62,15 @@ static void play(const char *pattern, long interval, int repeat)
 				   *p == ']' ? BTN_TR : *p == 'N' ? BTN_NORTH :
 				   *p == 'W' ? BTN_WEST : *p == 'S' ? BTN_START :
 				   *p == 'E' ? BTN_SELECT : -1;
-			if (code >= 0)
+			if (*p == 'Q') {
+				emit(EV_KEY, BTN_MODE, 1);
+				emit(EV_SYN, SYN_REPORT, 0);
+				msleep(80);
+				press(BTN_START);
+				msleep(80);
+				emit(EV_KEY, BTN_MODE, 0);
+				emit(EV_SYN, SYN_REPORT, 0);
+			} else if (code >= 0)
 				press(code);
 			msleep(interval);
 		}

@@ -105,6 +105,8 @@ struct audio_state {
 	bool power_sounds_enabled;
 	/* Home Music On/Off (user request 2026-10-28): off keeps the volume. */
 	bool home_music_enabled;
+	/* Percent per Vol+/Vol- press (GitHub #6): 1, 2, 5 or 10. */
+	int volume_step;
 	/* Notification, error and screenshot cues (Quick Menu toasts). */
 	bool notify_sounds_enabled;
 
@@ -166,6 +168,12 @@ static void emit_state_changed(DBusConnection *conn,
 static void reroute_owned_streams(struct audio_state *state);
 static void service_owned_streams(struct audio_state *state);
 static bool start_music_new(struct audio_state *state);
+
+/* Steps offered for the volume buttons. */
+static bool volume_step_valid(int step)
+{
+	return step == 1 || step == 2 || step == 5 || step == 10;
+}
 
 /* Home Music is on and its volume above 0%. */
 static bool music_audible(const struct audio_state *state)
@@ -794,6 +802,7 @@ static void load_config(struct audio_state *state)
 	state->navigation_sounds_enabled = DEFAULT_NAVIGATION_SOUNDS;
 	state->power_sounds_enabled = DEFAULT_POWER_SOUNDS;
 	state->home_music_enabled = true;
+	state->volume_step = 1;
 	state->notify_sounds_enabled = DEFAULT_NOTIFY_SOUNDS;
 	state->test_pid = -1;
 	state->system_pid = -1;
@@ -877,6 +886,10 @@ static void load_config(struct audio_state *state)
 			state->notify_sounds_enabled = strcmp(line + 28, "0") != 0;
 		} else if (strncmp(line, "AUDIO_HOME_MUSIC_ENABLED=", 25) == 0) {
 			state->home_music_enabled = strcmp(line + 25, "0") != 0;
+		} else if (strncmp(line, "AUDIO_VOLUME_STEP=", 18) == 0) {
+			int v = atoi(line + 18);
+			if (volume_step_valid(v))
+				state->volume_step = v;
 		}
 	}
 
@@ -1520,7 +1533,8 @@ static void status_reply(const struct audio_state *state,
 		 "volume.home_music=%d\n"
 		 "home_music.enabled=%d\n"
 		 "home_music.playing=%d\n"
-		 "home_music.track=%s\n",
+		 "home_music.track=%s\n"
+		 "volume.step=%d\n",
 		 state->mode,
 		 state->selected,
 		 state->bluetooth_available ? 1 : 0,
@@ -1537,7 +1551,8 @@ static void status_reply(const struct audio_state *state,
 		 state->volume_home_music,
 		 state->home_music_enabled ? 1 : 0,
 		 state->music_pid > 0 ? 1 : 0,
-		 state->music_file[0] != '\0' ? state->music_file : "");
+		 state->music_file[0] != '\0' ? state->music_file : "",
+		 state->volume_step);
 }
 
 static void route_reply(const struct audio_state *state,
@@ -2712,6 +2727,57 @@ static void handle_command(struct audio_state *state,
 		}
 
 		snprintf(reply, reply_size, "OK\n");
+		return;
+	}
+
+	if (strcmp(command, "VOLUME STEP GET") == 0) {
+		snprintf(reply, reply_size, "%d\n", state->volume_step);
+		return;
+	}
+
+	if (sscanf(command, "VOLUME STEP SET %31s", arg1) == 1) {
+		int step = atoi(arg1);
+
+		if (!volume_step_valid(step)) {
+			snprintf(reply, reply_size, "ERR step must be 1, 2, 5 or 10\n");
+			return;
+		}
+		if (update_config("AUDIO_VOLUME_STEP", arg1) != 0) {
+			snprintf(reply, reply_size, "ERR volume step update failed\n");
+			return;
+		}
+		state->volume_step = step;
+		emit_state_changed(dbus_conn, state);
+		snprintf(reply, reply_size, "OK\n");
+		return;
+	}
+
+	/* Vol+/Vol- (GitHub #6): one step of the chosen size, landing on a
+	 * multiple of it (73% + 5 = 75%, 73% - 5 = 70%). */
+	if (sscanf(command, "VOLUME KEY %31s", arg1) == 1) {
+		int step = state->volume_step;
+		int current = selected_volume(state);
+		int next;
+
+		if (strcmp(arg1, "UP") != 0 && strcmp(arg1, "DOWN") != 0) {
+			snprintf(reply, reply_size, "ERR expected UP or DOWN\n");
+			return;
+		}
+		if (current < 0) {
+			snprintf(reply, reply_size,
+				 "unsupported %s\n", state->selected);
+			return;
+		}
+		next = strcmp(arg1, "UP") == 0
+			? (current / step + 1) * step
+			: ((current + step - 1) / step - 1) * step;
+		if (persist_selected_volume(state, dbus_conn,
+					    next < 0 ? 0 : next > 100 ? 100 : next) != 0) {
+			snprintf(reply, reply_size, "ERR volume update failed\n");
+			return;
+		}
+
+		status_reply(state, reply, reply_size);
 		return;
 	}
 

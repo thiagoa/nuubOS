@@ -36,6 +36,9 @@ pub static GAME_RUNNING: AtomicBool = AtomicBool::new(false);
 pub static PORT_RUNNING: AtomicBool = AtomicBool::new(false);
 /* libraryd lists unavailable games (Settings → Gaming → LIBRARY). */
 pub static SHOW_UNAVAILABLE: AtomicBool = AtomicBool::new(false);
+/* Home's rows go round from the last item to the first (GitHub #28;
+ * libraryd device setting, on by default). */
+pub static WRAP_ROWS: AtomicBool = AtomicBool::new(true);
 /* The first library snapshot reached Home (home_covers_settled). */
 static SNAPSHOT_SEEN: AtomicBool = AtomicBool::new(false);
 /* Decoded covers kept in memory (LRU). */
@@ -254,6 +257,7 @@ fn parse_snapshot(reply: &str) -> LibSnapshot {
             "scanning" => s.scanning = value == "1",
             "scan_new" => s.scan_new = value.parse().unwrap_or(0),
             "show_unavailable" => SHOW_UNAVAILABLE.store(value == "1", Ordering::Relaxed),
+            "wrap_rows" => WRAP_ROWS.store(value == "1", Ordering::Relaxed),
             "recent" => s.recent.extend(parse_game(value)),
             "favorites_pending" => s.favorites_pending = value != "0",
             "collection" => {
@@ -1460,6 +1464,8 @@ pub fn launch_with_mode(ui: &HomeWindow, id: &str, available: bool, mode: &str) 
                 /* portsd: PortMaster is missing or being installed. */
                 "unavailable" if port => tr(&ui, 1357, "Install PortMaster first"),
                 "unavailable" | "game" => tr(&ui, 434, "This game is not available"),
+                /* nuubos-emud: BIOS, saves or states on an SD2 card that is out. */
+                "data" => tr(&ui, 1443, "Insert the SD2 card with your data"),
                 _ => tr(&ui, 431, "The game could not be started"),
             };
             play_ui_sound("error");
@@ -1553,6 +1559,7 @@ pub fn start_game_listener(ui: &HomeWindow) {
                             let weak = weak.clone();
                             let _ = slint::invoke_from_event_loop(move || {
                                 if let Some(ui) = weak.upgrade() {
+                                    crate::home_window_shown(&ui, true);
                                     if ui.get_launch_open() {
                                         hide_launch_screen(&ui);
                                     }
@@ -1757,8 +1764,12 @@ fn move_column(ui: &HomeWindow, delta: i32) -> bool {
         ROW_COLLECTIONS => (ui.get_home_collections().row_count(), ui.get_home_collections_index()),
         _ => (ui.get_home_apps().row_count(), ui.get_home_apps_index()),
     };
-    let next = index + delta;
-    if count == 0 || next < 0 || next >= count as i32 {
+    let count = count as i32;
+    let mut next = index + delta;
+    if count > 1 && (next < 0 || next >= count) && WRAP_ROWS.load(Ordering::Relaxed) {
+        next = next.rem_euclid(count);
+    }
+    if count == 0 || next < 0 || next >= count {
         return false;
     }
     match ui.get_home_row() {
@@ -1787,6 +1798,54 @@ fn move_grid(ui: &HomeWindow, delta: i32) -> bool {
     true
 }
 
+/* L2/R2 in a game list (GitHub #14): one screen of rows up or down,
+ * stopping at the first or last game. */
+fn page_grid(ui: &HomeWindow, delta: i32) -> bool {
+    let count = ui.get_library_games().row_count() as i32;
+    let index = ui.get_library_index();
+    if count == 0 {
+        return false;
+    }
+    let cols = ui.get_library_columns().max(1);
+    /* The last visible row is often cut: a page keeps one row in view. */
+    let rows = (ui.get_library_visible_rows() - 1).max(1);
+    let next = (index + delta * rows * cols).clamp(0, count - 1);
+    if next == index {
+        return false;
+    }
+    ui.set_library_index(next);
+    refresh_grid_window(ui);
+    true
+}
+
+/* L1/R1 in a system's (or collection's) game list (GitHub #14): the
+ * previous / next one in Home's row, wrapping around; Back then returns to
+ * it on Home. */
+fn switch_grid(ui: &HomeWindow, delta: i32) -> bool {
+    let card = ui.get_library_card();
+    let (model, systems) = match card.kind {
+        KIND_SYSTEM => (ui.get_home_systems(), true),
+        KIND_COLLECTION => (ui.get_home_collections(), false),
+        _ => return false,
+    };
+    let cards: Vec<(usize, HomeCard)> = (0..model.row_count())
+        .filter_map(|i| model.row_data(i).map(|c| (i, c)))
+        .filter(|(_, c)| c.kind == card.kind)
+        .collect();
+    let Some(pos) = cards.iter().position(|(_, c)| c.key == card.key) else { return false };
+    if cards.len() < 2 {
+        return false;
+    }
+    let (index, next) = cards[(pos as i32 + delta).rem_euclid(cards.len() as i32) as usize].clone();
+    if systems {
+        ui.set_home_systems_index(index as i32);
+    } else {
+        ui.set_home_collections_index(index as i32);
+    }
+    open_grid(ui, &next);
+    true
+}
+
 /* Home / library navigation. Returns nothing: every press is consumed. */
 pub fn handle_home_action(ui: &HomeWindow, action: &str) {
     if ui.get_start_sheet_open() {
@@ -1808,6 +1867,19 @@ pub fn handle_home_action(ui: &HomeWindow, action: &str) {
         "menu_down" => if grid { move_grid(ui, cols) } else { move_row(ui, 1) },
         "menu_left" => if grid { move_grid(ui, -1) } else { move_column(ui, -1) },
         "menu_right" => if grid { move_grid(ui, 1) } else { move_column(ui, 1) },
+        "page_prev" | "page_next" if grid => {
+            if switch_grid(ui, if action == "page_prev" { -1 } else { 1 }) {
+                play_ui_sound("menu_right");
+            }
+            return;
+        }
+        "tab_prev" | "tab_next" if grid => {
+            if page_grid(ui, if action == "tab_prev" { -1 } else { 1 }) {
+                play_ui_sound("menu_down");
+                ui.set_home_notice("".into());
+            }
+            return;
+        }
         "menu_back" => {
             if grid {
                 play_ui_sound(action);

@@ -1,0 +1,35 @@
+From: nuubOS Project <noreply@nuubos.invalid>
+Subject: [PATCH] sunxi: h700: leave VDD-DRAM to the SPL
+
+The SPL powers the DRAM it detected with boot0's voltage (DDR3 1.5 V,
+LPDDR3 1.2 V, LPDDR4 1.1 V), but U-Boot's device tree fixed vdd-dram
+(AXP717 DCDC3) at 1.1 V with min = max: the regulator uclass then set
+1.1 V right after the SPL, on every board, and Linux (same tree) did it
+again. The RG CubeXX has LPDDR3 (JEDEC VDD2/VDDQ 1.14-1.30 V): under the
+heaviest GPU and memory load it flipped single bits in kernel pointers
+and page tables (oopses in fresh panfrost job objects, user page-table
+entries with stray high bits, whole-system hangs), about one God of War
+PSP launch in 15-50; at 1.14 V 100 launches ran clean.
+
+A range covering every type keeps the SPL's value (no autoset without
+min = max). The stock firmware leaves this rail to boot0 too.
+
+Signed-off-by: nuubOS Project <noreply@nuubos.invalid>
+---
+--- a/dts/upstream/src/arm64/allwinner/sun50i-h700-anbernic-rg35xx-2024.dts
++++ b/dts/upstream/src/arm64/allwinner/sun50i-h700-anbernic-rg35xx-2024.dts
+@@ -271,8 +271,13 @@
+ 
+ 			reg_dcdc3: dcdc3 {
+ 				regulator-always-on;
++				/*
++				 * The SPL sets VDD-DRAM for the DRAM type it
++				 * detected: a range, so U-Boot (and Linux) keep
++				 * it instead of setting one voltage on every board.
++				 */
+ 				regulator-min-microvolt = <1100000>;
+-				regulator-max-microvolt = <1100000>;
++				regulator-max-microvolt = <1500000>;
+ 				regulator-name = "vdd-dram";
+ 			};
+ 
