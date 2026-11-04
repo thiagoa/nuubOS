@@ -53,7 +53,9 @@
  * <system> <key> <value> (empty value = inherit) and GAME_RESET <game>
  * change them. Only overrides are stored, per user, in
  * /userdata/users/<id>/appdata/nuubos-emulation/games/<game>.conf. They
- * apply at the next launch: core choice, aspect ratio and video filter on
+ * apply at the next launch. System Settings (GitHub #12): the same keys
+ * per system in .../nuubos-emulation/systems/<system>.conf; a key the game
+ * leaves unset follows its system: core choice, aspect ratio and video filter on
  * top of the user's RetroArch configuration, and the emulation accuracy of
  * melonDS-nuubOS and Flycast (translucent sorting) and the 3D render resolution (resolution_options) in the
  * user's core options for the session. RetroArch saves its whole
@@ -85,6 +87,7 @@
 #include <poll.h>
 #include <signal.h>
 #include <stdarg.h>
+#include <sched.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -92,6 +95,8 @@
 #include <string.h>
 #include <strings.h>
 #include <sys/inotify.h>
+#include <sys/mount.h>
+#include <sys/resource.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -192,6 +197,8 @@
 #define STATE_USERS "/state/users"
 #endif
 #define GAME_SETTINGS_SUBDIR "appdata/nuubos-emulation/games"
+/* System Settings (GitHub #12): the same keys for every game of a system. */
+#define SYSTEM_SETTINGS_SUBDIR "appdata/nuubos-emulation/systems"
 #define EMU_SETTINGS_FILE "appdata/nuubos-emulation/settings.conf"
 #define ACHIEVEMENTS_FILE "secrets/retroachievements.conf"
 #define PROFILE_FILE "profile.conf"
@@ -297,6 +304,10 @@ static const struct {
 	{ "Top Only", "single" },
 };
 #define NDS_LAYOUTS (int)(sizeof(nds_layouts) / sizeof(nds_layouts[0]))
+/* Picture in Picture: the small screen's corner (GitHub #5, core option
+ * melonds_nuubos_pip_corner, patch 0023); the first is the default. */
+static const char *const nds_corners[] = { "bottom-right", "bottom-left", "top-right", "top-left" };
+#define NDS_CORNERS (int)(sizeof(nds_corners) / sizeof(nds_corners[0]))
 
 static const char *const overlay_fields[] = {
 	"fps", "cpu", "gpu", "ram", "temp", "power", "battery", "clock", NULL,
@@ -336,6 +347,8 @@ struct session {
 	int stdin_fd;
 	int stdout_fd;
 	int input_fd;
+	/* Controls of the game (REMAP to inputd), "control:target,...". */
+	char remap[512];
 	char out_buf[MAX_LINE];
 	size_t out_used;
 	char user[64];
@@ -349,6 +362,10 @@ struct session {
 	char rom[PATH_MAX];
 	char states_dir[PATH_MAX];
 	char state_base[PATH_MAX];
+	/* A PSP game in a folder of its own: the folder and where RetroArch
+	 * sees it on the memory stick (psp_folder_game). */
+	char game_dir[PATH_MAX];
+	char game_mount[PATH_MAX];
 	int slot;
 	bool paused;
 	bool fast_forward;
@@ -418,6 +435,7 @@ struct session {
 	/* Per-game Square Pixels: NUUBOS_RA_PIXEL_CROP (patch 0014). */
 	bool pixel_crop;
 	int nds_layout;
+	int nds_corner;
 	bool stylus;
 	char stylus_control[8];
 	/* Disc control (multi-disc games, RetroArch patch 0013): the disc
@@ -450,6 +468,64 @@ struct discovery {
 	} hosts[16];
 };
 
+/* Controls (user request 2026-10-29): what each control of the console
+ * sends to the game's pad, per game over per system ("" = inherited, the
+ * control itself; "none" = nothing). Ids are the Controllers service's, in
+ * Game Hotkeys order; inputd applies them on the game gamepads (REMAP),
+ * the hotkey chords stay on the physical controls. */
+#define REMAP_COUNT 16
+static const char *const remap_controls[REMAP_COUNT] = {
+	"menu_confirm", "menu_back", "face_north", "face_west", "menu_up", "menu_down", "menu_left",
+	"menu_right", "l1", "r1", "l2", "r2", "l3", "r3", "settings", "select",
+};
+
+/* The buttons of each system's pad, as RetroArch's pad controls the cores
+ * map them to (their input descriptors, 2026-10-29): control:label, an
+ * empty label = the control's own name (Start, Select), "#<n>" = string n.
+ * The D-pad is every system's. Systems not listed use RetroArch's names. */
+static const struct pad_layout {
+	const char *systems; /* space separated, with a space at both ends */
+	const char *buttons;
+} pad_layouts[] = {
+	{ " nes fds ", "menu_back:A,menu_confirm:B,select:,settings:" },
+	{ " snes satellaview sufami nds ",
+	  "menu_back:A,menu_confirm:B,face_north:X,face_west:Y,l1:L,r1:R,select:,settings:" },
+	{ " gb gbc megaduck ", "menu_back:A,menu_confirm:B,select:,settings:" },
+	{ " gba ", "menu_back:A,menu_confirm:B,l1:L,r1:R,select:,settings:" },
+	{ " n64 ", "menu_confirm:A,face_west:B,l2:Z,l1:L,r1:R,settings:" },
+	{ " megadrive segacd sega32x ",
+	  "face_west:A,menu_confirm:B,menu_back:C,l1:X,face_north:Y,r1:Z,select:Mode,settings:" },
+	{ " mastersystem gamegear sg1000 ", "menu_confirm:1,menu_back:2,settings:" },
+	{ " psx ", "menu_confirm:#1459,menu_back:#1460,face_north:#1461,face_west:#1462,"
+		   "l1:L1,r1:R1,l2:L2,r2:R2,l3:L3,r3:R3,select:,settings:" },
+	{ " psp ", "menu_confirm:#1459,menu_back:#1460,face_north:#1461,face_west:#1462,l1:L,r1:R,select:,settings:" },
+	{ " saturn ", "menu_confirm:A,menu_back:B,l1:C,face_west:X,face_north:Y,r1:Z,l2:L,r2:R,settings:" },
+	{ " dreamcast ", "menu_confirm:A,menu_back:B,face_west:X,face_north:Y,l2:L,r2:R,settings:" },
+	{ " pcengine pcecd ", "menu_back:I,menu_confirm:II,select:,settings:Run" },
+};
+
+static const char pad_generic[] =
+	"menu_back:A,menu_confirm:B,face_north:X,face_west:Y,l1:L,r1:R,l2:L2,r2:R2,l3:L3,r3:R3,select:,settings:";
+
+static const char *system_pad(const char *system)
+{
+	char word[40];
+
+	snprintf(word, sizeof(word), " %s ", system);
+	for (size_t i = 0; i < sizeof(pad_layouts) / sizeof(pad_layouts[0]); i++)
+		if (strstr(pad_layouts[i].systems, word))
+			return pad_layouts[i].buttons;
+	return pad_generic;
+}
+
+static int remap_index(const char *control)
+{
+	for (int i = 0; i < REMAP_COUNT; i++)
+		if (!strcmp(remap_controls[i], control))
+			return i;
+	return -1;
+}
+
 /* Explicit per-game overrides; empty = inherited. The cheats are the
  * user's choice for the game: the list (a .cht file) and the indices of
  * the cheats turned on in it ("0,4,7"). */
@@ -472,13 +548,48 @@ struct game_overrides {
 	 * its next launch (user request 2026-10-18). */
 	char nds_layout[16];
 	char stylus[8];
+	/* Picture in Picture corner (nds_corners), "" = bottom right. */
+	char nds_corner[16];
 	/* Nintendo 64: the accessory in the controllers' slot, rumble (the
 	 * default, empty) or memory (Controller Pak saves). One slot, as on the
 	 * console (user request 2026-10-21: "scelta per gioco"). */
 	char n64_pak[8];
 	/* 3D render resolution: "" (Auto), "1x" or "2x". */
 	char resolution[8];
+	/* Frameskip: "" (the user's core option), "off", "auto" or "max". */
+	char frameskip[8];
+	/* Frame-rate aware CPU limit: the step the game needed, its next
+	 * launch starts there (no stutter at every launch while it climbs). */
+	char cpu_level[4];
+	/* Controls: the target of each of remap_controls. */
+	char remap[REMAP_COUNT][16];
 };
+
+static bool remap_set(const struct game_overrides *o)
+{
+	for (int i = 0; i < REMAP_COUNT; i++)
+		if (o->remap[i][0])
+			return true;
+	return false;
+}
+
+/* "control:target,..." of the controls set. */
+static void remap_list(const struct game_overrides *o, char *out, size_t size)
+{
+	size_t len = 0;
+
+	out[0] = '\0';
+	for (int i = 0; i < REMAP_COUNT; i++) {
+		int n;
+
+		if (!o->remap[i][0])
+			continue;
+		n = snprintf(out + len, size - len, "%s%s:%s", len ? "," : "", remap_controls[i], o->remap[i]);
+		if (n < 0 || (size_t)n >= size - len)
+			break;
+		len += (size_t)n;
+	}
+}
 
 /* Cores whose 3D render resolution Game Settings chooses (user decision
  * 2026-10-27): the option and its 1x (native) and 2x values, matched by the
@@ -520,6 +631,47 @@ static const struct resolution_option *resolution_option(const char *core)
 			return &resolution_options[i];
 	return NULL;
 }
+
+/* Cores whose frameskip Game Settings chooses (user decision 2026-10-29,
+ * GitHub #23): Off, Auto (a frame skipped only while the emulation falls
+ * behind, at most one in a row) or Max (the same, up to three in a row).
+ * Up to two options per core, their values for off/auto/max, and the value
+ * a key RetroArch has not written yet holds (the core's default). */
+enum { FRAMESKIP_OFF, FRAMESKIP_AUTO, FRAMESKIP_MAX, FRAMESKIP_MODES };
+static const char *const frameskip_modes[FRAMESKIP_MODES] = { "off", "auto", "max" };
+
+static const struct frameskip_option {
+	const char *core;
+	const char *key[2];
+	const char *value[2][FRAMESKIP_MODES];
+	const char *initial[2];
+} frameskip_options[] = {
+	{ MELONDS_NUUBOS, { "melonds_frameskip", NULL },
+	  { { "disabled", "auto", "auto_max" } }, { "disabled" } },
+	{ "flycast", { "reicast_frame_skipping", NULL },
+	  { { "disabled", "auto", "auto_max" } }, { "disabled" } },
+	{ "ppsspp", { "ppsspp_auto_frameskip", "ppsspp_frameskip" },
+	  { { "disabled", "enabled", "enabled" }, { "disabled", "1", "3" } }, { "disabled", "disabled" } },
+	{ "pcsx_rearmed", { "pcsx_rearmed_frameskip_type", "pcsx_rearmed_frameskip_interval" },
+	  { { "disabled", "auto", "auto" }, { NULL, "1", "3" } }, { "disabled", "3" } },
+};
+
+static const struct frameskip_option *frameskip_option(const char *core)
+{
+	for (size_t i = 0; i < sizeof(frameskip_options) / sizeof(frameskip_options[0]); i++)
+		if (!strncmp(core, frameskip_options[i].core, strlen(frameskip_options[i].core)))
+			return &frameskip_options[i];
+	return NULL;
+}
+
+static int frameskip_mode(const char *name)
+{
+	for (int m = 0; m < FRAMESKIP_MODES; m++)
+		if (!strcmp(name, frameskip_modes[m]))
+			return m;
+	return -1;
+}
+
 
 
 static volatile sig_atomic_t stop_requested;
@@ -576,6 +728,18 @@ static void trim(char *text)
 	while (len > 0 && (text[len - 1] == '\n' || text[len - 1] == '\r' ||
 			   isspace((unsigned char)text[len - 1])))
 		text[--len] = '\0';
+}
+
+/* fclose() after the data reached the card. /userdata is exFAT: a file
+ * renamed over the old one before its data was written comes back empty
+ * after a crash or a power loss (the emulation settings, 2026-10-29). */
+static int close_synced(FILE *fp)
+{
+	int rc = fflush(fp) != 0 || fsync(fileno(fp)) != 0 ? -1 : 0;
+
+	if (fclose(fp) != 0)
+		rc = -1;
+	return rc;
 }
 
 static int write_all(int fd, const char *data, size_t len)
@@ -731,7 +895,7 @@ static bool update_core_option(const char *path, const char *key,
 		}
 	}
 	fclose(in);
-	if (fclose(out) != 0 || (changed && rename(tmp, path) != 0)) {
+	if (close_synced(out) != 0 || (changed && rename(tmp, path) != 0)) {
 		unlink(tmp);
 		return false;
 	}
@@ -833,8 +997,28 @@ static void write_core_option(const char *path, const char *key, const char *val
 	if (!done)
 		fprintf(out, "%s = \"%s\"\n", key, value);
 	fclose(in);
-	if (fclose(out) != 0 || rename(tmp, path) != 0)
+	if (close_synced(out) != 0 || rename(tmp, path) != 0)
 		unlink(tmp);
+}
+
+/* The mode the user's core options give: off, auto, max or custom. */
+static const char *frameskip_default(const struct frameskip_option *fs, const char *options)
+{
+	char value[2][64];
+
+	for (int k = 0; k < 2 && fs->key[k]; k++)
+		if (!read_core_option(options, fs->key[k], value[k], sizeof(value[k])))
+			copy_text(value[k], sizeof(value[k]), fs->initial[k]);
+	for (int m = 0; m < FRAMESKIP_MODES; m++) {
+		bool match = true;
+
+		for (int k = 0; k < 2 && fs->key[k]; k++)
+			if (fs->value[k][m] && strcmp(value[k], fs->value[k][m]))
+				match = false;
+		if (match)
+			return frameskip_modes[m];
+	}
+	return "custom";
 }
 
 /* Sets a core option for this session only: the user's value comes back
@@ -1066,6 +1250,7 @@ static size_t build_status(char *out, size_t size)
 			 "netplay_peers=%d\n"
 			 "netplay_peer=%s\n"
 			 "nds_layout=%d\n"
+			 "nds_corner=%d\n"
 			 "stylus=%s\n"
 			 "disc=%d\n"
 			 "discs=%d\n"
@@ -1095,6 +1280,7 @@ static size_t build_status(char *out, size_t size)
 			 /* melonDS-nuubOS only (Quick Menu rows), else -1/off. */
 			 session.state != SESSION_IDLE && !strcmp(session.core, MELONDS_NUUBOS)
 			 ? session.nds_layout : -1,
+			 session.nds_corner,
 			 session.state != SESSION_IDLE && session.stylus ? session.stylus_control : "off",
 			 session.disc, session.discs,
 			 /* The game is closing: quit asked (its automatic save may
@@ -1282,6 +1468,32 @@ static bool read_active_user(char *out, size_t size)
 	return out[0] != '\0';
 }
 
+/* Data on SD2 (nuubos-storagectl, GitHub #24): BIOS files, saves or states
+ * on the SD2 card while it is away (or moving): a game would start without
+ * them and write nowhere, so it waits for the card. */
+static bool data_away(void)
+{
+	FILE *fp = fopen("/run/nuubos/storage/data.status", "r");
+	char line[256], on[160] = "", state[32] = "";
+
+	if (!fp)
+		return false;
+	while (fgets(line, sizeof(line), fp)) {
+		trim(line);
+		if (!strncmp(line, "DATA_ON=", 8))
+			copy_text(on, sizeof(on), line + 8);
+		else if (!strncmp(line, "DATA_STATE=", 11))
+			copy_text(state, sizeof(state), line + 11);
+	}
+	fclose(fp);
+	if (strcmp(state, "offline") && strcmp(state, "moving"))
+		return false;
+	for (char *tok = strtok(on, ","); tok; tok = strtok(NULL, ","))
+		if (!strcmp(tok, "bios") || !strcmp(tok, "saves") || !strcmp(tok, "states"))
+			return true;
+	return false;
+}
+
 /* Systems whose frames keep the H700 GPU or CPU near its limit: they keep
  * the default swap order (see NUUBOS_SWAP_WAIT_AFTER at the launch). */
 static bool heavy_system(const char *system)
@@ -1303,15 +1515,21 @@ static bool heavy_system(const char *system)
  * keep their full frame rate at 1032 (CubeXX 2026-10-28). A game starts
  * capped at the lowest step and goes up a step in the first second with
  * RetroArch's audio buffer running low (the emulation falls behind real
- * time: the same signal the cores' auto frameskip uses); it never goes back
- * down in a session (a needless step costs a little power, a late one a
- * visible stutter). Launch, state loads, resume from pause and
+ * time: the same signal the cores' auto frameskip uses) or with fewer
+ * frames than the core's nominal rate (cores that drop frames to keep real
+ * time, e.g. parallel-n64 at 480 MHz: 30 of 50 fps with the audio intact);
+ * it never goes back down in a session (a needless step costs a little
+ * power, a late one a visible stutter), and the game's next launch starts at
+ * the step it reached (games/<game>.conf cpu_level; Reset in Game Settings
+ * forgets it). Launch, state loads, resume from pause and
  * fast-forward run uncapped. power.sh applies the file as one more upper
  * limit next to the profile and the screen-off cap. */
 #define GAME_CPU_FILE RUN_ROOT "/game-cpu-max"
 #define GAME_CPU_LEVELS 3
-/* Frames with the audio buffer below 25 % in a one-second check. */
+/* Frames with the audio buffer below 33 % in a one-second check. */
 #define GAME_CPU_LOW_FRAMES 3
+/* Frames presented below this share of the core's nominal rate. */
+#define GAME_CPU_MIN_FPS_RATIO 0.9
 #define GAME_CPU_START_GRACE_MS 10000
 #define GAME_CPU_GRACE_MS 3000
 
@@ -1370,6 +1588,30 @@ static void game_cpu_apply(int khz)
 	}
 }
 
+/* BIOS files left in the root of the bios folder (as other systems keep
+ * them) copied where the core looks (GitHub #26, nuubos-biosctl place). */
+static void place_bios(const char *system)
+{
+	int status;
+	pid_t pid = fork();
+
+	if (pid == 0) {
+		int null = open("/dev/null", O_RDWR | O_CLOEXEC);
+
+		if (null >= 0) {
+			dup2(null, STDIN_FILENO);
+			dup2(null, STDOUT_FILENO);
+			dup2(null, STDERR_FILENO);
+		}
+		execl("/usr/bin/nuubos-biosctl", "nuubos-biosctl", "place", system, (char *)NULL);
+		_exit(127);
+	}
+	/* Waited for here, before RetroArch starts (the main loop's reaper
+	 * never sees this child first). */
+	while (pid > 0 && waitpid(pid, &status, 0) < 0 && errno == EINTR)
+		;
+}
+
 static void game_cpu_grace(long long ms)
 {
 	long long until = monotonic_ms() + ms;
@@ -1388,24 +1630,42 @@ static void game_cpu_update(void)
 	game_cpu_apply(khz);
 }
 
+static void load_overrides(const char *user, const char *game, struct game_overrides *o);
+static int save_overrides(const char *user, const char *game, const struct game_overrides *o);
+
+/* The step the game reached, for its next launch. */
+static void game_cpu_remember(void)
+{
+	struct game_overrides o;
+
+	if (!session.game[0])
+		return;
+	load_overrides(session.user, session.game, &o);
+	snprintf(o.cpu_level, sizeof(o.cpu_level), "%d", session.cpu_level);
+	if (save_overrides(session.user, session.game, &o) != 0)
+		log_msg("emud: saving the CPU step of %s failed", session.game);
+}
+
 /* A game below the top step is asked for its frame rate once a second. */
 static bool game_cpu_watching(void)
 {
 	return !session.menu && session.cpu_level < GAME_CPU_LEVELS - 1;
 }
 
-/* One GET_FPS reply a second: frames that ran with the audio buffer low. */
-static void game_cpu_check(unsigned low)
+/* One GET_FPS reply a second: frames presented, frames that ran with the
+ * audio buffer low, the core's nominal frame rate. */
+static void game_cpu_check(double fps, unsigned low, double nominal)
 {
 	if (session.state != SESSION_RUNNING || session.menu || session.paused ||
 	    session.fast_forward || session.cpu_level >= GAME_CPU_LEVELS - 1 ||
 	    monotonic_ms() < session.cpu_grace_ms)
 		return;
-	if (low < GAME_CPU_LOW_FRAMES)
+	if (low < GAME_CPU_LOW_FRAMES && !(nominal > 0 && fps < nominal * GAME_CPU_MIN_FPS_RATIO))
 		return;
 	session.cpu_level++;
-	log_msg("emud: %s behind (%u low audio frames), CPU limit %d kHz", session.system,
-		low, game_cpu_caps[session.cpu_level]);
+	game_cpu_remember();
+	log_msg("emud: %s behind (%.1f of %.2f fps, %u low audio frames), CPU limit %d kHz",
+		session.system, fps, nominal, low, game_cpu_caps[session.cpu_level]);
 	game_cpu_grace(GAME_CPU_GRACE_MS);
 	game_cpu_update();
 }
@@ -1687,14 +1947,12 @@ static void overrides_path(const char *user, const char *game, char *out, size_t
 	snprintf(out, size, USERS_DIR "/%s/" GAME_SETTINGS_SUBDIR "/%s.conf", user, game);
 }
 
-static void load_overrides(const char *user, const char *game, struct game_overrides *o)
+static void load_overrides_at(const char *path, struct game_overrides *o)
 {
-	char path[PATH_MAX];
 	char line[PATH_MAX + 32];
 	FILE *fp;
 
 	memset(o, 0, sizeof(*o));
-	overrides_path(user, game, path, sizeof(path));
 	fp = fopen(path, "r");
 	if (!fp)
 		return;
@@ -1723,29 +1981,94 @@ static void load_overrides(const char *user, const char *game, struct game_overr
 			copy_text(o->nds_layout, sizeof(o->nds_layout), eq);
 		else if (!strcmp(line, "stylus"))
 			copy_text(o->stylus, sizeof(o->stylus), eq);
+		else if (!strcmp(line, "nds_corner"))
+			copy_text(o->nds_corner, sizeof(o->nds_corner), eq);
 		else if (!strcmp(line, "n64_pak"))
 			copy_text(o->n64_pak, sizeof(o->n64_pak), eq);
 		else if (!strcmp(line, "resolution"))
 			copy_text(o->resolution, sizeof(o->resolution), eq);
+		else if (!strcmp(line, "frameskip"))
+			copy_text(o->frameskip, sizeof(o->frameskip), eq);
+		else if (!strcmp(line, "cpu_level"))
+			copy_text(o->cpu_level, sizeof(o->cpu_level), eq);
+		else if (!strncmp(line, "remap_", 6) && remap_index(line + 6) >= 0)
+			copy_text(o->remap[remap_index(line + 6)], sizeof(o->remap[0]), eq);
 	}
 	fclose(fp);
 }
 
-static int save_overrides(const char *user, const char *game, const struct game_overrides *o)
+static void load_overrides(const char *user, const char *game, struct game_overrides *o)
 {
 	char path[PATH_MAX];
+
+	overrides_path(user, game, path, sizeof(path));
+	load_overrides_at(path, o);
+}
+
+static void system_overrides_path(const char *user, const char *system, char *out, size_t size)
+{
+	snprintf(out, size, USERS_DIR "/%s/" SYSTEM_SETTINGS_SUBDIR "/%s.conf", user, system);
+}
+
+static void load_system_overrides(const char *user, const char *system, struct game_overrides *o)
+{
+	char path[PATH_MAX];
+
+	system_overrides_path(user, system, path, sizeof(path));
+	load_overrides_at(path, o);
+}
+
+/* The keys a system can set (System Settings, Controls); the rest are the
+ * game's own (layout, stylus, cheats, CPU step). */
+static bool system_keys_set(const struct game_overrides *o)
+{
+	return o->core[0] || o->aspect[0] || o->scaling[0] || o->filter[0] || o->accuracy[0] || o->n64_pak[0] ||
+	       o->resolution[0] || o->frameskip[0] || remap_set(o);
+}
+
+static void clear_system_keys(struct game_overrides *o)
+{
+	o->core[0] = o->aspect[0] = o->scaling[0] = o->filter[0] = o->accuracy[0] = o->n64_pak[0] =
+		o->resolution[0] = '\0';
+	o->frameskip[0] = '\0';
+	memset(o->remap, 0, sizeof(o->remap));
+}
+
+/* What a game inherits: its own value, else its system's. */
+static void inherit_system(struct game_overrides *o, const struct game_overrides *sys)
+{
+	if (!o->core[0])
+		copy_text(o->core, sizeof(o->core), sys->core);
+	if (!o->aspect[0])
+		copy_text(o->aspect, sizeof(o->aspect), sys->aspect);
+	if (!o->scaling[0])
+		copy_text(o->scaling, sizeof(o->scaling), sys->scaling);
+	if (!o->filter[0])
+		copy_text(o->filter, sizeof(o->filter), sys->filter);
+	if (!o->accuracy[0])
+		copy_text(o->accuracy, sizeof(o->accuracy), sys->accuracy);
+	if (!o->n64_pak[0])
+		copy_text(o->n64_pak, sizeof(o->n64_pak), sys->n64_pak);
+	if (!o->resolution[0])
+		copy_text(o->resolution, sizeof(o->resolution), sys->resolution);
+	if (!o->frameskip[0])
+		copy_text(o->frameskip, sizeof(o->frameskip), sys->frameskip);
+	for (int i = 0; i < REMAP_COUNT; i++)
+		if (!o->remap[i][0])
+			copy_text(o->remap[i], sizeof(o->remap[i]), sys->remap[i]);
+}
+
+static int save_overrides_at(const char *dir, const char *path, const struct game_overrides *o)
+{
 	char tmp[PATH_MAX + 8];
-	char dir[PATH_MAX];
 	FILE *fp;
 	int rc = 0;
 
-	overrides_path(user, game, path, sizeof(path));
-	/* Nothing overridden: no file, the game inherits everything. */
+	/* Nothing overridden: no file, everything is inherited. */
 	if (!o->core[0] && !o->aspect[0] && !o->scaling[0] && !o->filter[0] && !o->accuracy[0] &&
-	    !o->cheat_file[0] && !o->cheats[0] && !o->nds_layout[0] && !o->stylus[0] &&
-	    !o->n64_pak[0] && !o->resolution[0])
+	    !o->cheat_file[0] && !o->cheats[0] && !o->nds_layout[0] && !o->stylus[0] && !o->nds_corner[0] &&
+	    !o->n64_pak[0] && !o->resolution[0] && !o->frameskip[0] && !o->cpu_level[0] && !remap_set(o))
 		return unlink(path) == 0 || errno == ENOENT ? 0 : -1;
-	snprintf(dir, sizeof(dir), USERS_DIR "/%s/" GAME_SETTINGS_SUBDIR, user);
 	if (mkdir_p(dir) != 0)
 		return -1;
 	snprintf(tmp, sizeof(tmp), "%s.tmp", path);
@@ -1770,19 +2093,48 @@ static int save_overrides(const char *user, const char *game, const struct game_
 		fprintf(fp, "nds_layout=%s\n", o->nds_layout);
 	if (o->stylus[0])
 		fprintf(fp, "stylus=%s\n", o->stylus);
+	if (o->nds_corner[0])
+		fprintf(fp, "nds_corner=%s\n", o->nds_corner);
 	if (o->n64_pak[0])
 		fprintf(fp, "n64_pak=%s\n", o->n64_pak);
 	if (o->resolution[0])
 		fprintf(fp, "resolution=%s\n", o->resolution);
+	if (o->frameskip[0])
+		fprintf(fp, "frameskip=%s\n", o->frameskip);
+	if (o->cpu_level[0])
+		fprintf(fp, "cpu_level=%s\n", o->cpu_level);
+	for (int i = 0; i < REMAP_COUNT; i++)
+		if (o->remap[i][0])
+			fprintf(fp, "remap_%s=%s\n", remap_controls[i], o->remap[i]);
 	if (ferror(fp))
 		rc = -1;
-	if (fclose(fp) != 0)
+	if (close_synced(fp) != 0)
 		rc = -1;
 	if (rc == 0 && rename(tmp, path) != 0)
 		rc = -1;
 	if (rc != 0)
 		unlink(tmp);
 	return rc;
+}
+
+static int save_overrides(const char *user, const char *game, const struct game_overrides *o)
+{
+	char path[PATH_MAX];
+	char dir[PATH_MAX];
+
+	overrides_path(user, game, path, sizeof(path));
+	snprintf(dir, sizeof(dir), USERS_DIR "/%s/" GAME_SETTINGS_SUBDIR, user);
+	return save_overrides_at(dir, path, o);
+}
+
+static int save_system_overrides(const char *user, const char *system, const struct game_overrides *o)
+{
+	char path[PATH_MAX];
+	char dir[PATH_MAX];
+
+	system_overrides_path(user, system, path, sizeof(path));
+	snprintf(dir, sizeof(dir), USERS_DIR "/%s/" SYSTEM_SETTINGS_SUBDIR, user);
+	return save_overrides_at(dir, path, o);
 }
 
 static bool valid_aspect(const char *v)
@@ -2035,7 +2387,7 @@ static int save_settings(const char *user, const struct emu_settings *e)
 		return -1;
 	if (fwrite(text, 1, len, fp) != len)
 		rc = -1;
-	if (fclose(fp) != 0)
+	if (close_synced(fp) != 0)
 		rc = -1;
 	if (rc == 0 && rename(tmp, path) != 0)
 		rc = -1;
@@ -2062,6 +2414,10 @@ static void send_hotkeys(void)
 	line[len++] = '\n';
 	if (write_all(session.input_fd, line, len) != 0)
 		log_msg("emud: hotkeys to inputd failed");
+	/* The game's Controls ("REMAP" alone = every control is itself). */
+	snprintf(line, sizeof(line), "REMAP %s\n", session.remap);
+	if (write_all(session.input_fd, line, strlen(line)) != 0)
+		log_msg("emud: controls to inputd failed");
 }
 
 /* ------------------------------------------------------------------ */
@@ -2368,7 +2724,7 @@ static void apply_boot_options(const char *path, bool boot)
 			fprintf(out, "%s = \"%s\"\n", boot_options[i].key,
 				boot_option_on(i, boot) ? boot_options[i].on : boot_options[i].off);
 	fclose(in);
-	if (fclose(out) != 0 || rename(tmp, path) != 0)
+	if (close_synced(out) != 0 || rename(tmp, path) != 0)
 		unlink(tmp);
 }
 
@@ -2379,6 +2735,9 @@ static void apply_boot_options(const char *path, bool boot)
 struct achievements {
 	bool enabled;
 	bool hardcore;
+	bool offline;
+	/* RAOfflineProxy is up for this session: RetroArch talks to it. */
+	bool proxy;
 	char username[64];
 	char token[128];
 };
@@ -2395,6 +2754,7 @@ static void load_achievements(const char *user, struct achievements *a)
 	FILE *fp;
 
 	memset(a, 0, sizeof(*a));
+	a->offline = true;
 	snprintf(path, sizeof(path), STATE_USERS "/%s/" ACHIEVEMENTS_FILE, user);
 	fp = fopen(path, "r");
 	if (!fp)
@@ -2414,11 +2774,210 @@ static void load_achievements(const char *user, struct achievements *a)
 			a->enabled = !strcmp(eq, "1");
 		else if (!strcmp(line, "HARDCORE"))
 			a->hardcore = !strcmp(eq, "1");
+		else if (!strcmp(line, "OFFLINE"))
+			a->offline = !strcmp(eq, "1");
 	}
 	fclose(fp);
 	if (!a->username[0] || !a->token[0] || !cfg_value_safe(a->username) ||
 	    !cfg_value_safe(a->token))
 		a->enabled = false;
+}
+
+/* ------------------------------------------------------------------ */
+/* Offline achievements (RAOfflineProxy, GitHub #18)                    */
+/* ------------------------------------------------------------------ */
+
+/*
+ * RAOfflineProxy (GPL-3.0, its own process) sits between RetroArch and
+ * retroachievements.org for casual sessions of a user with Offline
+ * Achievements on (default): online it forwards and caches each game's
+ * data, offline it serves the cache and queues the unlocks, which it sends
+ * (backdated) once the server answers again. Hardcore never goes through
+ * it. Started at the first such launch and left running so the queue can
+ * drain after the game; restarted for another user or new credentials,
+ * stopped when not wanted. Its data (cache, queue, login) is the user's,
+ * in STATE: /state/users/<id>/secrets/raofflineproxy. RetroArch's
+ * credentials are in the session config only, so the proxy gets its own
+ * root-only copy in /run.
+ */
+#define RAPROXY_PORT 47380
+#define RAPROXY_RUN "/run/nuubos/raproxy"
+#define RAPROXY_CFG RAPROXY_RUN "/retroarch.cfg"
+
+static pid_t raproxy_pid = -1;
+static char raproxy_user[64];
+
+static void raproxy_kill(pid_t pid)
+{
+	kill(pid, SIGTERM);
+	for (int i = 0; i < 40 && waitpid(pid, NULL, WNOHANG) == 0; i++)
+		usleep(50000);
+	if (waitpid(pid, NULL, WNOHANG) == 0) {
+		kill(pid, SIGKILL);
+		waitpid(pid, NULL, 0);
+	}
+}
+
+static void raproxy_stop(void)
+{
+	if (raproxy_pid > 0) {
+		raproxy_kill(raproxy_pid);
+		log_msg("emud: offline achievements proxy stopped");
+	}
+	raproxy_pid = -1;
+	raproxy_user[0] = '\0';
+	unlink(RAPROXY_RUN "/pid");
+}
+
+/* One left by an earlier nuubos-emud (restarted): its pid file. */
+static void raproxy_stop_stale(void)
+{
+	char path[64], cmd[256] = "";
+	FILE *fp = fopen(RAPROXY_RUN "/pid", "r");
+	long pid = 0;
+	size_t n;
+
+	if (!fp)
+		return;
+	if (fscanf(fp, "%ld", &pid) != 1)
+		pid = 0;
+	fclose(fp);
+	unlink(RAPROXY_RUN "/pid");
+	snprintf(path, sizeof(path), "/proc/%ld/cmdline", pid);
+	if (pid <= 1 || !(fp = fopen(path, "r")))
+		return;
+	n = fread(cmd, 1, sizeof(cmd) - 1, fp);
+	fclose(fp);
+	for (size_t i = 0; i < n; i++)
+		if (!cmd[i])
+			cmd[i] = ' ';
+	cmd[n] = '\0';
+	if (strstr(cmd, "raofflineproxy"))
+		kill((pid_t)pid, SIGTERM);
+}
+
+static bool raproxy_listening(void)
+{
+	struct sockaddr_in addr = { .sin_family = AF_INET, .sin_port = htons(RAPROXY_PORT) };
+	int fd = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+	bool ok;
+
+	if (fd < 0)
+		return false;
+	addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+	ok = connect(fd, (struct sockaddr *)&addr, sizeof(addr)) == 0;
+	close(fd);
+	return ok;
+}
+
+/* The credentials file the proxy reads (root only); *changed when it was
+ * different (a new login). */
+static bool raproxy_write_cfg(const struct achievements *a, bool *changed)
+{
+	char text[512], old[512] = "";
+	FILE *fp;
+	size_t n;
+
+	snprintf(text, sizeof(text),
+		 "cheevos_enable = \"true\"\ncheevos_username = \"%s\"\ncheevos_token = \"%s\"\n"
+		 "cheevos_hardcore_mode_enable = \"false\"\n", a->username, a->token);
+	if ((fp = fopen(RAPROXY_CFG, "r"))) {
+		n = fread(old, 1, sizeof(old) - 1, fp);
+		old[n] = '\0';
+		fclose(fp);
+	}
+	*changed = strcmp(old, text) != 0;
+	if (!*changed)
+		return true;
+	if (mkdir(RAPROXY_RUN, 0700) != 0 && errno != EEXIST)
+		return false;
+	umask(077);
+	fp = fopen(RAPROXY_CFG ".tmp", "w");
+	umask(022);
+	if (!fp)
+		return false;
+	fputs(text, fp);
+	return fclose(fp) == 0 && rename(RAPROXY_CFG ".tmp", RAPROXY_CFG) == 0;
+}
+
+/* Up for this user's casual session, or stopped when not wanted. True when
+ * RetroArch should talk to it. */
+static bool raproxy_ensure(const char *user, const struct achievements *a)
+{
+	char dir[PATH_MAX], path[PATH_MAX];
+	bool changed = false;
+	FILE *fp;
+	pid_t pid;
+
+	if (raproxy_pid < 0)
+		raproxy_stop_stale();
+	if (!a->enabled || a->hardcore || !a->offline || access("/usr/bin/python3", X_OK) != 0) {
+		raproxy_stop();
+		unlink(RAPROXY_CFG);
+		return false;
+	}
+	if (raproxy_pid > 0 && (strcmp(raproxy_user, user) || waitpid(raproxy_pid, NULL, WNOHANG) != 0))
+		raproxy_stop();
+	if (!raproxy_write_cfg(a, &changed)) {
+		raproxy_stop();
+		return false;
+	}
+	if (raproxy_pid > 0 && !changed && raproxy_listening())
+		return true;
+	raproxy_stop();
+	snprintf(dir, sizeof(dir), STATE_USERS "/%s/secrets/raofflineproxy", user);
+	if (mkdir_p(dir) != 0)
+		return false;
+	chmod(dir, 0700);
+	/* Its own settings: this port, these credentials, never usage reports
+	 * (the uploads are also taken out of the nuubOS build). */
+	snprintf(path, sizeof(path), "%s/config.json", dir);
+	if ((fp = fopen(path, "w"))) {
+		fprintf(fp, "{\"proxy_host\": \"127.0.0.1\", \"proxy_port\": %d, \"retroarch_cfg\": \"%s\", "
+			    "\"usage_report_url\": \"\", \"usage_stats_consent\": false}\n", RAPROXY_PORT, RAPROXY_CFG);
+		fclose(fp);
+	}
+	pid = fork();
+	if (pid == 0) {
+		int null = open("/dev/null", O_RDWR);
+
+		setsid();
+		if (null >= 0) {
+			dup2(null, 0);
+			dup2(null, 1);
+			dup2(null, 2);
+		}
+		/* Never in the way of the game. */
+		setpriority(PRIO_PROCESS, 0, 10);
+		setenv("RAOFFLINEPROXY_CONFIG_DIR", dir, 1);
+		setenv("RAOFFLINEPROXY_RETROARCH_CFG", RAPROXY_CFG, 1);
+		setenv("HOME", dir, 1);
+		execl("/usr/bin/python3", "python3", "-m", "raofflineproxy.main", "run-service", (char *)NULL);
+		_exit(127);
+	}
+	if (pid < 0)
+		return false;
+	raproxy_pid = pid;
+	copy_text(raproxy_user, sizeof(raproxy_user), user);
+	if ((fp = fopen(RAPROXY_RUN "/pid", "w"))) {
+		fprintf(fp, "%d\n", (int)pid);
+		fclose(fp);
+	}
+	/* Python starts in about a second on the H700. */
+	for (int i = 0; i < 100; i++) {
+		if (raproxy_listening()) {
+			log_msg("emud: offline achievements proxy up for %s", user);
+			return true;
+		}
+		if (waitpid(pid, NULL, WNOHANG) != 0) {
+			raproxy_pid = -1;
+			break;
+		}
+		usleep(50000);
+	}
+	log_msg("emud: offline achievements proxy did not start, direct connection");
+	raproxy_stop();
+	return false;
 }
 
 /* ------------------------------------------------------------------ */
@@ -2511,7 +3070,7 @@ static void restore_user_keys(void)
 		}
 	}
 	fclose(in);
-	if (fclose(out) == 0 && rename(tmp, session.ra_cfg) == 0)
+	if (close_synced(out) == 0 && rename(tmp, session.ra_cfg) == 0)
 		log_msg("emud: restored %d user RetroArch keys", session.restore_count);
 	else
 		unlink(tmp);
@@ -2686,6 +3245,7 @@ static void write_session_overrides(FILE *fp, const struct achievements *a)
 	remember_key("cheevos_token");
 	remember_key("cheevos_password");
 	remember_key("cheevos_hardcore_mode_enable");
+	remember_key("cheevos_custom_host");
 	if (a->enabled) {
 		fprintf(fp,
 			"cheevos_enable = \"true\"\n"
@@ -2694,6 +3254,11 @@ static void write_session_overrides(FILE *fp, const struct achievements *a)
 			"cheevos_password = \"\"\n"
 			"cheevos_hardcore_mode_enable = \"%s\"\n",
 			a->username, a->token, a->hardcore ? "true" : "false");
+		/* Offline achievements: through the local proxy (casual only). */
+		if (a->proxy && !a->hardcore)
+			fprintf(fp, "cheevos_custom_host = \"127.0.0.1:%d\"\n", RAPROXY_PORT);
+		else
+			fprintf(fp, "cheevos_custom_host = \"\"\n");
 	} else {
 		fprintf(fp, "cheevos_enable = \"false\"\n"
 			    "cheevos_token = \"\"\n"
@@ -3008,17 +3573,18 @@ static void handle_ra_reply(char *line)
 		return;
 	}
 	if (!strncmp(line, "GET_FPS ", 8)) {
-		/* "GET_FPS <fps> <frames with the audio buffer low>" (RetroArch
-		 * patches 0003 and 0015). The snapshot changes only for the
-		 * overlay: no Quick Menu wakeup a second otherwise. */
-		double fps = 0;
+		/* "GET_FPS <fps> <frames with the audio buffer low> <nominal
+		 * fps>" (RetroArch patches 0003 and 0015). The snapshot changes
+		 * only for the overlay: no Quick Menu wakeup a second otherwise. */
+		double fps = 0, nominal = 0;
 		unsigned low = 0;
 
-		if (sscanf(line + 8, "%lf %u", &fps, &low) >= 1 && session.settings.overlay) {
+		if (sscanf(line + 8, "%lf %u %lf", &fps, &low, &nominal) >= 1 &&
+		    session.settings.overlay) {
 			session.fps = fps;
 			notify_subscribers();
 		}
-		game_cpu_check(low);
+		game_cpu_check(fps, low, nominal);
 		return;
 	}
 	if (sscanf(line, "SET_PAUSED %d", &slot) == 1) {
@@ -3684,9 +4250,62 @@ static void content_base_name(const char *content, char *out, size_t size)
 		*dot = '\0';
 }
 
+/*
+ * GitHub #30: a PSP game in a folder of its own ("<Folder>/EBOOT.PBP",
+ * homebrew and PSN games) runs from ms0:/PSP/GAME/<Folder>/ as on a PSP.
+ * PPSSPP starts a game outside its memory stick from umd0:/, and some
+ * ports need the memory stick path (JGR Portable prepares its data only
+ * from there). Its states go to states/psp/<Folder>/: every such game is
+ * called EBOOT.
+ */
+static bool psp_folder_game(const char *system, const char *content, char *folder, size_t size)
+{
+	const char *name = strrchr(content, '/');
+	const char *start;
+
+	if (strcmp(system, "psp") || !name || name == content || strcasecmp(name + 1, "EBOOT.PBP"))
+		return false;
+	start = name;
+	while (start > content && start[-1] != '/')
+		start--;
+	if (start == name || (size_t)(name - start) >= size)
+		return false;
+	snprintf(folder, size, "%.*s", (int)(name - start), start);
+	return true;
+}
+
+/*
+ * In the RetroArch child: the game's folder bound on the memory stick, in
+ * <saves>/psp/GAME/<Folder> (PPSSPP's memory stick is RetroArch's save
+ * directory; named psp, it is the stick's PSP folder itself: STRIP_PSP,
+ * PPSSPP patch 0006), in RetroArch's own mount namespace: Syncthing, the backup and the rest
+ * of the system never see it, and it goes away with RetroArch. The content
+ * path then names the game there. Without it the game still starts, from
+ * umd0:/ as before.
+ */
+static void bind_game_folder(char *content, size_t size)
+{
+	const char *name = strrchr(content, '/');
+	char path[PATH_MAX];
+
+	if (!session.game_mount[0] || !name)
+		return;
+	if (unshare(CLONE_NEWNS) != 0 ||
+	    mount(NULL, "/", NULL, MS_REC | MS_SLAVE, NULL) != 0 ||
+	    mount(session.game_dir, session.game_mount, NULL, MS_BIND | MS_REC, NULL) != 0) {
+		log_msg("emud: game folder not on the memory stick: %s", strerror(errno));
+		return;
+	}
+	snprintf(path, sizeof(path), "%s%s", session.game_mount, name);
+	copy_text(content, size, path);
+}
+
 static void reset_session(void)
 {
 	stop_watch();
+	/* The empty mount point of psp_folder_game (RetroArch is gone). */
+	if (session.game_mount[0])
+		(void)rmdir(session.game_mount);
 	if (session.shot_fd > 0)
 		close(session.shot_fd);
 	free_restore();
@@ -3867,6 +4486,8 @@ static const char *launch(const char *game, const char *mode, const char *net)
 		return "game";
 	if (!read_active_user(session.user, sizeof(session.user)))
 		return "no-user";
+	if (data_away())
+		return "data";
 	load_settings(session.user, &session.settings);
 
 	snprintf(command, sizeof(command), "RESOLVE\t%s", game);
@@ -3891,10 +4512,19 @@ static const char *launch(const char *game, const char *mode, const char *net)
 			  core_path, sizeof(core_path)))
 		return "no-core";
 	load_overrides(session.user, game, &overrides);
+	{
+		struct game_overrides sys;
+
+		/* What the game leaves unset comes from its System Settings. */
+		load_system_overrides(session.user, session.system, &sys);
+		inherit_system(&overrides, &sys);
+		remap_list(&overrides, session.remap, sizeof(session.remap));
+	}
 	load_achievements(session.user, &achievements);
 	session.hardcore = achievements.enabled && achievements.hardcore;
 	if (session.hardcore && !strncmp(mode, "slot:", 5))
 		return "hardcore";
+	achievements.proxy = raproxy_ensure(session.user, &achievements);
 	/* Joining: the host's emulator, whatever the game's choice. */
 	if (net_core[0]) {
 		char cores[512];
@@ -3935,6 +4565,22 @@ static const char *launch(const char *game, const char *mode, const char *net)
 	snprintf(saves, sizeof(saves), "%s/saves/%s", base, session.system);
 	snprintf(session.states_dir, sizeof(session.states_dir), "%s/states/%s",
 		 base, session.system);
+	{
+		char folder[NAME_MAX + 1];
+		const char *slash = strrchr(session.content, '/');
+
+		if (psp_folder_game(session.system, session.content, folder, sizeof(folder))) {
+			size_t len = strlen(session.states_dir);
+
+			snprintf(session.states_dir + len, sizeof(session.states_dir) - len, "/%s", folder);
+			snprintf(session.game_dir, sizeof(session.game_dir), "%.*s",
+				 (int)(slash - session.content), session.content);
+			snprintf(session.game_mount, sizeof(session.game_mount), "%s/GAME/%s",
+				 saves, folder);
+			if (mkdir_p(session.game_mount) != 0)
+				return "storage";
+		}
+	}
 	snprintf(screenshots, sizeof(screenshots), "%s/screenshots", base);
 	snprintf(path, sizeof(path), "%s/config/remaps", ra_dir);
 	if (mkdir_p(path) != 0 || mkdir_p(saves) != 0 ||
@@ -3943,6 +4589,7 @@ static const char *launch(const char *game, const char *mode, const char *net)
 	    mkdir_p(BIOS_DIR) != 0)
 		return "storage";
 	wait_system_seed(session.core);
+	place_bios(session.system);
 	snprintf(path, sizeof(path), "%s/retroarch.cfg", ra_dir);
 	if (seed_file(DEFAULT_RA_CFG, path) != 0)
 		return "storage";
@@ -3973,6 +4620,11 @@ static const char *launch(const char *game, const char *mode, const char *net)
 		}
 		write_core_option(path, "melonds_nuubos_stylus",
 				  session.stylus ? session.stylus_control : "off");
+		session.nds_corner = 0;
+		for (int i = 0; i < NDS_CORNERS; i++)
+			if (!strcmp(overrides.nds_corner, nds_corners[i]))
+				session.nds_corner = i;
+		write_core_option(path, "melonds_nuubos_pip_corner", nds_corners[session.nds_corner]);
 		if (read_core_option(path, "melonds_screen_layout", value, sizeof(value)))
 			for (int i = 0; i < NDS_LAYOUTS; i++)
 				if (!strcmp(value, nds_layouts[i].value))
@@ -4041,6 +4693,21 @@ static const char *launch(const char *game, const char *mode, const char *net)
 			if (!read_core_option(path, res->key, value, sizeof(value)))
 				write_core_option(path, res->key, res->x1);
 			session_core_option(res->key, !strcmp(choice, "2x") ? res->x2 : res->x1);
+		}
+	}
+	{
+		/* Frameskip for this session: the game's (or its system's)
+		 * choice; none = the user's core options. */
+		const struct frameskip_option *fs = frameskip_option(session.core);
+		int mode = frameskip_mode(overrides.frameskip);
+		char value[64];
+
+		for (int k = 0; fs && mode >= 0 && k < 2 && fs->key[k]; k++) {
+			if (!fs->value[k][mode])
+				continue;
+			if (!read_core_option(path, fs->key[k], value, sizeof(value)))
+				write_core_option(path, fs->key[k], fs->initial[k]);
+			session_core_option(fs->key[k], fs->value[k][mode]);
 		}
 	}
 
@@ -4123,6 +4790,7 @@ static const char *launch(const char *game, const char *mode, const char *net)
 			argv[argc++] = (char *)"--verbose";
 		argv[argc++] = (char *)"-L";
 		argv[argc++] = core_path;
+		bind_game_folder(session.content, sizeof(session.content));
 		argv[argc++] = session.content;
 		argv[argc] = NULL;
 		snprintf(cfg, sizeof(cfg), "%s/retroarch.cfg", ra_dir);
@@ -4145,6 +4813,9 @@ static const char *launch(const char *game, const char *mode, const char *net)
 	session.overlay_tick_ms = monotonic_ms() + OVERLAY_TICK_MS;
 	session.fast_forward = false;
 	session.cpu_level = full_clock_system(session.system) ? GAME_CPU_LEVELS - 1 : 0;
+	if (atoi(overrides.cpu_level) > session.cpu_level)
+		session.cpu_level = atoi(overrides.cpu_level) < GAME_CPU_LEVELS ?
+				    atoi(overrides.cpu_level) : GAME_CPU_LEVELS - 1;
 	game_cpu_grace(GAME_CPU_START_GRACE_MS);
 	session.started_ms = monotonic_ms();
 	copy_text(session.net_launch, sizeof(session.net_launch), net_address[0] ? "connect" : net);
@@ -4503,6 +5174,11 @@ static void reap_children(void)
 			child_exited(status);
 		else if (pid == seed_pid)
 			seed_pid = -1;
+		else if (pid == raproxy_pid) {
+			log_msg("emud: offline achievements proxy exited");
+			raproxy_pid = -1;
+			raproxy_user[0] = '\0';
+		}
 	}
 }
 
@@ -4661,6 +5337,7 @@ static void save_nds_choice(void)
 	load_overrides(session.user, session.game, &o);
 	copy_text(o.nds_layout, sizeof(o.nds_layout), nds_layouts[session.nds_layout].name);
 	copy_text(o.stylus, sizeof(o.stylus), session.stylus ? session.stylus_control : "off");
+	copy_text(o.nds_corner, sizeof(o.nds_corner), session.nds_corner ? nds_corners[session.nds_corner] : "");
 	if (save_overrides(session.user, session.game, &o) != 0)
 		log_msg("emud: saving the NDS layout of %s failed", session.game);
 }
@@ -4674,6 +5351,17 @@ static void set_nds_layout(int layout)
 	ra_command("SET_CORE_OPTION melonds_screen_layout %s",
 		   nds_layouts[layout].value);
 	notify_screens(layout);
+	notify_subscribers();
+}
+
+/* Picture in Picture corner, live (Quick Menu, GitHub #5). */
+static void set_nds_corner(int corner)
+{
+	if (corner < 0 || corner >= NDS_CORNERS)
+		return;
+	session.nds_corner = corner;
+	save_nds_choice();
+	ra_command("SET_CORE_OPTION melonds_nuubos_pip_corner %s", nds_corners[corner]);
 	notify_subscribers();
 }
 
@@ -4787,16 +5475,74 @@ static bool session_running(struct client *c)
 	return false;
 }
 
+/* Games of a system with their own value for a System Settings key; with
+ * reset those values go (the game follows its system again; its layout,
+ * stylus, cheats stay). */
+static int system_games(const char *user, const char *system, bool reset)
+{
+	char dir[PATH_MAX];
+	char path[PATH_MAX + 300];
+	char command[96];
+	char answer[PATH_MAX + 128];
+	struct dirent *e;
+	DIR *d;
+	int n = 0;
+
+	snprintf(dir, sizeof(dir), USERS_DIR "/%s/" GAME_SETTINGS_SUBDIR, user);
+	if (!(d = opendir(dir)))
+		return 0;
+	while ((e = readdir(d))) {
+		struct game_overrides o;
+		char game[64];
+		char *dot;
+		size_t len;
+
+		copy_text(game, sizeof(game), e->d_name);
+		if (!(dot = strstr(game, ".conf")) || dot[5])
+			continue;
+		*dot = '\0';
+		if (!valid_game(game))
+			continue;
+		snprintf(path, sizeof(path), "%s/%s", dir, e->d_name);
+		load_overrides_at(path, &o);
+		if (!system_keys_set(&o))
+			continue;
+		snprintf(command, sizeof(command), "RESOLVE\t%s", game);
+		len = strlen(system);
+		if (library_request(command, answer, sizeof(answer)) != 0 || strncmp(answer, "OK ", 3) ||
+		    strncmp(answer + 3, system, len) || answer[3 + len] != '\t')
+			continue;
+		n++;
+		if (reset) {
+			clear_system_keys(&o);
+			if (save_overrides(user, game, &o) != 0)
+				log_msg("emud: resetting the settings of %s failed", game);
+		}
+	}
+	closedir(d);
+	return n;
+}
+
 /* GAME_SETTINGS <game> <system> | GAME_SET <game> <system> <key> <value> |
- * GAME_RESET <game>, for the active user. */
+ * GAME_RESET <game>; System Settings (GitHub #12): SYSTEM_SETTINGS
+ * <system> | SYSTEM_SET <system> <key> <value> | SYSTEM_RESET <system> |
+ * SYSTEM_RESET_GAMES <system> (the games' own values of these keys go);
+ * for the active user. A game's unset key follows its system, a system's
+ * the default. GAME_SETTINGS also lists the system's values (system_*),
+ * SYSTEM_SETTINGS the games with their own values (games=). Controls:
+ * pad= the system's buttons (pad_layouts), remap= / system_remap= the
+ * controls set ("control:target,..."), keys remap_<control> and remap. */
 static void handle_game_settings(struct client *c, const char *verb, char *arg)
 {
 	char *fields[4] = { arg, NULL, NULL, NULL };
+	bool scope_system = !strncmp(verb, "SYSTEM_", 7);
+	const char *game = NULL, *system;
+	char *key, *value;
 	char user[64];
 	char cores[512];
 	char def_core[64];
 	char def_path[PATH_MAX];
-	struct game_overrides o;
+	struct game_overrides o, sys;
 	int n = 1;
 
 	for (char *p = arg; *p && n < 4; p++)
@@ -4804,31 +5550,61 @@ static void handle_game_settings(struct client *c, const char *verb, char *arg)
 			*p = '\0';
 			fields[n++] = p + 1;
 		}
-	if (!valid_game(fields[0])) {
-		reply(c, "ERR game\n");
-		return;
+	if (scope_system) {
+		system = fields[0];
+		key = fields[1];
+		value = fields[2];
+	} else {
+		game = fields[0];
+		system = fields[1];
+		key = fields[2];
+		value = fields[3];
+		if (!valid_game(game)) {
+			reply(c, "ERR game\n");
+			return;
+		}
 	}
 	if (!read_active_user(user, sizeof(user))) {
 		reply(c, "ERR no-user\n");
 		return;
 	}
-	load_overrides(user, fields[0], &o);
 	if (!strcmp(verb, "GAME_RESET")) {
 		memset(&o, 0, sizeof(o));
-		reply(c, save_overrides(user, fields[0], &o) == 0 ? "OK\n" : "ERR storage\n");
+		reply(c, save_overrides(user, game, &o) == 0 ? "OK\n" : "ERR storage\n");
 		return;
 	}
-	if (!fields[1] || !fields[1][0] || strchr(fields[1], '/')) {
+	if (!system || !system[0] || strchr(system, '/') || system[0] == '.') {
 		reply(c, "ERR system\n");
 		return;
 	}
-	available_cores(fields[1], cores, sizeof(cores));
-	if (!strcmp(verb, "GAME_SETTINGS")) {
-		char out[1280];
+	memset(&sys, 0, sizeof(sys));
+	if (scope_system) {
+		load_system_overrides(user, system, &o);
+	} else {
+		load_overrides(user, game, &o);
+		load_system_overrides(user, system, &sys);
+	}
+	if (!strcmp(verb, "SYSTEM_RESET")) {
+		memset(&o, 0, sizeof(o));
+		reply(c, save_system_overrides(user, system, &o) == 0 ? "OK\n" : "ERR storage\n");
+		return;
+	}
+	if (!strcmp(verb, "SYSTEM_RESET_GAMES")) {
+		char out[32];
+
+		snprintf(out, sizeof(out), "OK %d\n", system_games(user, system, true));
+		reply(c, out);
+		return;
+	}
+	available_cores(system, cores, sizeof(cores));
+	if (!strcmp(verb, "GAME_SETTINGS") || !strcmp(verb, "SYSTEM_SETTINGS")) {
+		char out[3072];
+		char remap[512], system_remap[512];
 		char accuracy_default[16];
 		char res_value[64];
 		const char *res_default = "";
 		const struct resolution_option *res;
+		const struct frameskip_option *fs;
 		const char *effective;
 		struct emu_settings settings;
 		char screen[16];
@@ -4836,9 +5612,12 @@ static void handle_game_settings(struct client *c, const char *verb, char *arg)
 
 		/* filter_default: what an empty filter gives (write_presentation) */
 		load_settings(user, &settings);
-		system_screen(fields[1], screen, sizeof(screen));
+		system_screen(system, screen, sizeof(screen));
 		def_core[0] = '\0';
-		(void)resolve_core(fields[1], def_core, sizeof(def_core), def_path, sizeof(def_path));
+		(void)resolve_core(system, def_core, sizeof(def_core), def_path, sizeof(def_path));
+		/* A game's default emulator is its system's choice. */
+		if (sys.core[0] && list_has(cores, sys.core))
+			copy_text(def_core, sizeof(def_core), sys.core);
 		effective = o.core[0] && list_has(cores, o.core) ? o.core : def_core;
 		/* Emulation accuracy: melonDS-nuubOS and Flycast; the default is
 		 * the user's core option (nuubOS ships "fast" for melonDS, per
@@ -4846,11 +5625,11 @@ static void handle_game_settings(struct client *c, const char *verb, char *arg)
 		snprintf(def_path, sizeof(def_path),
 			 USERS_DIR "/%s/appdata/retroarch/retroarch-core-options.cfg", user);
 		if (flycast_core(effective)) {
-			char value[64];
+			char option[64];
 
 			copy_text(accuracy_default, sizeof(accuracy_default),
-				  read_core_option(def_path, FLYCAST_SORTING, value, sizeof(value)) &&
-				  !strcmp(value, FLYCAST_SORTING_ACCURATE) ? "accurate" : "fast");
+				  read_core_option(def_path, FLYCAST_SORTING, option, sizeof(option)) &&
+				  !strcmp(option, FLYCAST_SORTING_ACCURATE) ? "accurate" : "fast");
 		} else if (!read_core_option(def_path, "melonds_accuracy", accuracy_default,
 					     sizeof(accuracy_default))) {
 			copy_text(accuracy_default, sizeof(accuracy_default), "fast");
@@ -4866,52 +5645,80 @@ static void handle_game_settings(struct client *c, const char *verb, char *arg)
 				      !strcmp(res_value, res->x2) ? "2x" : "custom";
 		else if (res)
 			res_default = "1x";
+		fs = frameskip_option(effective);
+		remap_list(&o, remap, sizeof(remap));
+		remap_list(&sys, system_remap, sizeof(system_remap));
 		len = snprintf(out, sizeof(out),
 			       "core=%s\ncore_default=%s\ncore_override=%s\ncores=%s\n"
 			       "aspect=%s\nscaling=%s\nfilter=%s\nfilter_default=%s\n"
 			       "accuracy_supported=%d\naccuracy=%s\naccuracy_default=%s\n"
 			       "pak_supported=%d\npak=%s\n"
-			       "resolution_supported=%d\nresolution=%s\nresolution_default=%s\nend=1\n",
+			       "resolution_supported=%d\nresolution=%s\nresolution_default=%s\n"
+			       "frameskip_supported=%d\nframeskip=%s\nframeskip_default=%s\n"
+			       "system_core=%s\nsystem_aspect=%s\nsystem_scaling=%s\nsystem_filter=%s\nsystem_accuracy=%s\n"
+			       "system_pak=%s\nsystem_resolution=%s\nsystem_frameskip=%s\ngames=%d\n"
+			       "pad=%s\nremap=%s\nsystem_remap=%s\nend=1\n",
 			       effective, def_core, o.core, cores, o.aspect, o.scaling, o.filter,
 			       settings.crt && !strcmp(screen, "crt") ? "crt" : "sharp",
 			       !strcmp(effective, MELONDS_NUUBOS) || flycast_core(effective),
 			       o.accuracy, accuracy_default,
-			       !strcmp(fields[1], "n64"), o.n64_pak,
-			       res != NULL, o.resolution, res_default);
+			       !strcmp(system, "n64"), o.n64_pak,
+			       res != NULL, o.resolution, res_default,
+			       fs != NULL, o.frameskip, fs ? frameskip_default(fs, def_path) : "",
+			       sys.core[0] && list_has(cores, sys.core) ? sys.core : "", sys.aspect, sys.scaling, sys.filter,
+			       sys.accuracy, sys.n64_pak, sys.resolution, sys.frameskip,
+			       scope_system ? system_games(user, system, false) : 0,
+			       system_pad(system), remap, system_remap);
 		if (len > 0 && write_all(c->fd, out, (size_t)len) != 0)
 			close_client(c);
 		return;
 	}
-	/* GAME_SET; an empty value (inherit) arrives without its field: the
-	 * request line loses its trailing tab with the other white space. */
-	if (!fields[2]) {
+	/* GAME_SET / SYSTEM_SET; an empty value (inherit) arrives without its
+	 * field: the request line loses its trailing tab with the other white
+	 * space. */
+	if (!key) {
 		reply(c, "ERR args\n");
 		return;
 	}
-	if (!fields[3])
-		fields[3] = fields[2] + strlen(fields[2]);
-	if (!strcmp(fields[2], "core") && (!fields[3][0] || list_has(cores, fields[3])))
-		copy_text(o.core, sizeof(o.core), fields[3]);
-	else if (!strcmp(fields[2], "aspect") && (!fields[3][0] || valid_aspect(fields[3])))
-		copy_text(o.aspect, sizeof(o.aspect), fields[3]);
-	else if (!strcmp(fields[2], "scaling") && (!fields[3][0] || valid_scaling(fields[3])))
-		copy_text(o.scaling, sizeof(o.scaling), fields[3]);
-	else if (!strcmp(fields[2], "filter") && (!fields[3][0] || valid_filter(fields[3])))
-		copy_text(o.filter, sizeof(o.filter), fields[3]);
-	else if (!strcmp(fields[2], "accuracy") &&
-		 (!fields[3][0] || !strcmp(fields[3], "fast") || !strcmp(fields[3], "accurate")))
-		copy_text(o.accuracy, sizeof(o.accuracy), fields[3]);
-	else if (!strcmp(fields[2], "pak") &&
-		 (!fields[3][0] || !strcmp(fields[3], "rumble") || !strcmp(fields[3], "memory")))
-		copy_text(o.n64_pak, sizeof(o.n64_pak), strcmp(fields[3], "rumble") ? fields[3] : "");
-	else if (!strcmp(fields[2], "resolution") &&
-		 (!fields[3][0] || !strcmp(fields[3], "1x") || !strcmp(fields[3], "2x")))
-		copy_text(o.resolution, sizeof(o.resolution), fields[3]);
+	if (!value)
+		value = key + strlen(key);
+	if (!strcmp(key, "core") && (!value[0] || list_has(cores, value)))
+		copy_text(o.core, sizeof(o.core), value);
+	else if (!strcmp(key, "aspect") && (!value[0] || valid_aspect(value)))
+		copy_text(o.aspect, sizeof(o.aspect), value);
+	else if (!strcmp(key, "scaling") && (!value[0] || valid_scaling(value)))
+		copy_text(o.scaling, sizeof(o.scaling), value);
+	else if (!strcmp(key, "filter") && (!value[0] || valid_filter(value)))
+		copy_text(o.filter, sizeof(o.filter), value);
+	else if (!strcmp(key, "accuracy") &&
+		 (!value[0] || !strcmp(value, "fast") || !strcmp(value, "accurate")))
+		copy_text(o.accuracy, sizeof(o.accuracy), value);
+	else if (!strcmp(key, "pak") &&
+		 (!value[0] || !strcmp(value, "rumble") || !strcmp(value, "memory")))
+		/* A game under a system set to Controller Pak keeps an explicit
+		 * Rumble Pak; a system's rumble is the default (empty). */
+		copy_text(o.n64_pak, sizeof(o.n64_pak),
+			  !strcmp(value, "rumble") && (scope_system || !sys.n64_pak[0]) ? "" : value);
+	else if (!strcmp(key, "resolution") &&
+		 (!value[0] || !strcmp(value, "1x") || !strcmp(value, "2x")))
+		copy_text(o.resolution, sizeof(o.resolution), value);
+	else if (!strcmp(key, "frameskip") && (!value[0] || frameskip_mode(value) >= 0))
+		copy_text(o.frameskip, sizeof(o.frameskip), value);
+	/* Controls: "remap" clears them all (Reset Controls); remap_<control>
+	 * takes another control, "none" or "" (inherited). */
+	else if (!strcmp(key, "remap") && !value[0])
+		memset(o.remap, 0, sizeof(o.remap));
+	else if (!strncmp(key, "remap_", 6) && remap_index(key + 6) >= 0 &&
+		 (!value[0] || !strcmp(value, "none") || remap_index(value) >= 0))
+		copy_text(o.remap[remap_index(key + 6)], sizeof(o.remap[0]), value);
 	else {
 		reply(c, "ERR value\n");
 		return;
 	}
-	reply(c, save_overrides(user, fields[0], &o) == 0 ? "OK\n" : "ERR storage\n");
+	if (scope_system)
+		reply(c, save_system_overrides(user, system, &o) == 0 ? "OK\n" : "ERR storage\n");
+	else
+		reply(c, save_overrides(user, game, &o) == 0 ? "OK\n" : "ERR storage\n");
 }
 
 /* Cheats are refused in hardcore mode and with netplay. */
@@ -5159,6 +5966,7 @@ static void handle_states(struct client *c, const char *game)
 		char command[64];
 		char answer[PATH_MAX + 128];
 		char name[NAME_MAX + 1];
+		char folder[NAME_MAX + 1];
 		char *tab;
 		struct emu_settings e;
 		struct achievements a;
@@ -5183,7 +5991,11 @@ static void handle_states(struct client *c, const char *game)
 		load_achievements(user, &a);
 		hardcore = a.enabled && a.hardcore;
 		content_base_name(tab + 1, name, sizeof(name));
-		snprintf(base, sizeof(base), USERS_DIR "/%s/states/%s/%s", user, answer + 3, name);
+		if (psp_folder_game(answer + 3, tab + 1, folder, sizeof(folder)))
+			snprintf(base, sizeof(base), USERS_DIR "/%s/states/%s/%s/%s", user, answer + 3,
+				 folder, name);
+		else
+			snprintf(base, sizeof(base), USERS_DIR "/%s/states/%s/%s", user, answer + 3, name);
 	} else if (session.state == SESSION_RUNNING) {
 		slots = session.settings.slots;
 		hardcore = session.hardcore;
@@ -5579,6 +6391,17 @@ static void handle_command(struct client *c, char *line)
 		}
 		set_nds_layout(atoi(arg));
 		reply(c, "OK\n");
+	} else if (!strcmp(line, "NDS_CORNER") && arg) {
+		/* NDS_CORNER <index of nds_corners> (Quick Menu, Picture in
+		 * Picture only). */
+		if (!running(c))
+			return;
+		if (strcmp(session.core, MELONDS_NUUBOS) != 0) {
+			reply(c, "ERR core\n");
+			return;
+		}
+		set_nds_corner(atoi(arg));
+		reply(c, "OK\n");
 	} else if (!strcmp(line, "HOTKEY") && arg) {
 		/* A game hotkey by name, as inputd sends it (tests, remote). */
 		if (!running(c))
@@ -5586,7 +6409,9 @@ static void handle_command(struct client *c, char *line)
 		handle_hotkey(arg);
 		reply(c, "OK\n");
 	} else if ((!strcmp(line, "GAME_SETTINGS") || !strcmp(line, "GAME_SET") ||
-		    !strcmp(line, "GAME_RESET")) && arg) {
+		    !strcmp(line, "GAME_RESET") || !strcmp(line, "SYSTEM_SETTINGS") ||
+		    !strcmp(line, "SYSTEM_SET") || !strcmp(line, "SYSTEM_RESET") ||
+		    !strcmp(line, "SYSTEM_RESET_GAMES")) && arg) {
 		handle_game_settings(c, line, arg);
 	} else if (!strcmp(line, "SETTINGS")) {
 		handle_settings(c, NULL, NULL);

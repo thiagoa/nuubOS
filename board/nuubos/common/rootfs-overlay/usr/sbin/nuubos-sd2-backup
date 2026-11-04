@@ -31,6 +31,12 @@
 # default). Never: secrets (users/*/secrets, Wi-Fi, Bluetooth, remote
 # access, SSH, scraper accounts, Syncthing and Moonlight keys).
 #
+# Data on SD2 (nuubos-storagectl, GitHub #24): an item whose folders live
+# on the SD2 card is skipped while the card is away (its folders are empty
+# placeholders: mirroring them would empty the backup) and when the backup
+# goes to that same card; its previous copy stays. A restore puts it on the
+# card (the card must be in).
+#
 # A restore is all or nothing: every area is first copied next to the live
 # one and checked (nothing live changes meanwhile), then all are swapped.
 # The journal in STATE lists the areas: an interrupted copy is cleaned up,
@@ -38,6 +44,7 @@
 
 MOUNT=/media/sd2
 CARD_STATUS=/run/nuubos/storage/sd2.status
+DATA_STATUS=/run/nuubos/storage/data.status
 RUN_STATUS=/run/nuubos/storage/backup.status
 CONF=/state/storage/sd2-backup.conf
 STATE=/state/storage/sd2-backup.state
@@ -82,6 +89,19 @@ items()
 }
 
 has_item() { case ",$(items)," in *",$1,"*) return 0 ;; esac; return 1; }
+
+# Data on SD2: the storagectl category of a backup item (library = per-user
+# library and catalog: always SD1).
+data_category() { case "$1" in covers) echo library ;; saves|states|screenshots|bios) echo "$1" ;; esac; }
+data_on() { dc="$(data_category "$1")"; [ -n "$dc" ] && case ",$(value "$DATA_STATUS" DATA_ON)," in *",$dc,"*) return 0 ;; esac; return 1; }
+data_online() { [ "$(value "$DATA_STATUS" DATA_STATE)" = online ]; }
+
+# Where a restore writes a /userdata folder: the card's nuubOS folder for
+# an item on SD2 (its bind over /userdata cannot be swapped).
+restore_target()
+{
+    if data_on "$1"; then echo "$MOUNT/nuubOS/${2#/userdata/}"; else echo "$2"; fi
+}
 
 # The chosen destination; by default the games card where the board has a
 # slot (it survives an SD1 reformat), else SD1.
@@ -259,6 +279,10 @@ backup_run()
             rm -rf "$DATA/$item"
             continue
         fi
+        if data_on "$item" && { ! data_online || [ "$(dest)" = sd2 ]; }; then
+            log "$item: on SD2, skipped"
+            continue
+        fi
         case "$item" in
             saves|states|screenshots)
                 extra=""; [ "$item" = screenshots ] && extra="$(user_items recordings)"
@@ -427,8 +451,10 @@ stage_users()
                 mkdir -p "/userdata/users/$id/appdata" || return 1
                 stage_area "$d/retroarch" "/userdata/users/$id/appdata/retroarch" || return 1
             else
-                mkdir -p "/userdata/users/$id" || return 1
-                stage_area "${d%/}" "/userdata/users/$id/$sub" || return 1
+                item="$sub"; [ "$sub" = recordings ] && item=screenshots
+                to="$(restore_target "$item" "/userdata/users/$id/$sub")"
+                mkdir -p "${to%/*}" || return 1
+                stage_area "${d%/}" "$to" || return 1
             fi
         done
     done
@@ -517,6 +543,10 @@ restore()
     fi
     # Never under a running game.
     nuubos-emuctl status 2>/dev/null | grep -q '^state=running' && fail game
+    # Items on SD2 are restored onto the card.
+    for i in $ITEMS_ALL; do
+        data_on "$i" && ! data_online && fail card
+    done
     lock || fail busy
     [ -f "$JOURNAL" ] && recover_now
     if [ -n "$user" ]; then
@@ -559,12 +589,12 @@ restore()
             progress $((5 + n * 4))
         done
         stage_file "$D/library/catalog.tsv" /userdata/library/catalog.tsv || { unstage; fail storage; }
-        stage_area "$D/bios" /userdata/bios || { unstage; fail storage; }
+        stage_area "$D/bios" "$(restore_target bios /userdata/bios)" || { unstage; fail storage; }
         progress 40
         n=0
         for c in covers metadata; do
             n=$((n + 1))
-            stage_area "$D/covers/$c" "/userdata/library/$c" || { unstage; fail storage; }
+            stage_area "$D/covers/$c" "$(restore_target covers "/userdata/library/$c")" || { unstage; fail storage; }
             progress $((40 + n * 25))
         done
     fi

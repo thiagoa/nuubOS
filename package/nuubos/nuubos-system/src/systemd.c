@@ -1020,14 +1020,15 @@ static void read_key_value_file(const char *path,
 }
 
 /* Storage (docs/dev/platform.md "SD2 = games card"): SD1 health from the
- * storage selector, the games card from nuubos-storagectl, the console
- * backup from nuubos-sd2-backup. They write these files and poke STORAGE
+ * storage selector, the games card and Data on SD2 from nuubos-storagectl,
+ * the console backup from nuubos-sd2-backup. They write these files and poke STORAGE
  * CHANGED; the free space is measured here at every snapshot. */
 struct storage_view {
     char sd1_health[32], sd1_action[32];
     char sd2_slot[8], sd2_state[24], sd2_cid[96], sd2_fs[16], sd2_label[64], sd2_prompt[16];
     char backup_enabled[8], backup_items[96], backup_last[24], backup_result[16], backup_card[16];
     char backup_dest[8], backup_available[4], backup_found[4];
+    char data_on[64], data_state[16], data_moving[16], data_conflicts[16];
     unsigned long long userdata_total, userdata_free, sd2_total, sd2_free;
 };
 
@@ -1047,6 +1048,7 @@ static void read_storage(struct storage_view *v)
     const char *sd1 = "/run/nuubos/storage/storage.status";
     const char *sd2 = "/run/nuubos/storage/sd2.status";
     const char *backup = "/run/nuubos/storage/backup.status";
+    const char *data = "/run/nuubos/storage/data.status";
 
     memset(v, 0, sizeof(*v));
     snprintf(v->sd1_health, sizeof(v->sd1_health), "unknown");
@@ -1058,6 +1060,8 @@ static void read_storage(struct storage_view *v)
     snprintf(v->backup_card, sizeof(v->backup_card), "none");
     snprintf(v->backup_available, sizeof(v->backup_available), "0");
     snprintf(v->backup_found, sizeof(v->backup_found), "0");
+    snprintf(v->data_state, sizeof(v->data_state), "none");
+    snprintf(v->data_conflicts, sizeof(v->data_conflicts), "0");
     read_key_value_file(sd1, "STORAGE_HEALTH", v->sd1_health, sizeof(v->sd1_health));
     read_key_value_file(sd1, "ACTION_REQUIRED", v->sd1_action, sizeof(v->sd1_action));
     read_key_value_file(sd2, "SD2_SLOT", v->sd2_slot, sizeof(v->sd2_slot));
@@ -1074,6 +1078,10 @@ static void read_storage(struct storage_view *v)
     read_key_value_file(backup, "DEST", v->backup_dest, sizeof(v->backup_dest));
     read_key_value_file(backup, "AVAILABLE", v->backup_available, sizeof(v->backup_available));
     read_key_value_file(backup, "FOUND", v->backup_found, sizeof(v->backup_found));
+    read_key_value_file(data, "DATA_ON", v->data_on, sizeof(v->data_on));
+    read_key_value_file(data, "DATA_STATE", v->data_state, sizeof(v->data_state));
+    read_key_value_file(data, "DATA_MOVING", v->data_moving, sizeof(v->data_moving));
+    read_key_value_file(data, "DATA_CONFLICTS", v->data_conflicts, sizeof(v->data_conflicts));
     space_of("/userdata", &v->userdata_total, &v->userdata_free);
     if (!strcmp(v->sd2_state, "ready") || !strcmp(v->sd2_state, "readonly"))
         space_of("/media/sd2", &v->sd2_total, &v->sd2_free);
@@ -1141,6 +1149,10 @@ static void reply_status(int fd, const struct runtime_state *st)
         "storage.backup.dest=%s\n"
         "storage.backup.available=%s\n"
         "storage.backup.found=%s\n"
+        "storage.data.on=%s\n"
+        "storage.data.state=%s\n"
+        "storage.data.moving=%s\n"
+        "storage.data.conflicts=%s\n"
         "lifecycle.stage=%s\n"
         "lifecycle.last_wake=%s\n"
         "lifecycle.last_sleep_ms=%lld\n"
@@ -1164,6 +1176,7 @@ static void reply_status(int fd, const struct runtime_state *st)
         sv.sd2_total,sv.sd2_free,
         sv.backup_enabled,sv.backup_items,sv.backup_last,sv.backup_result,sv.backup_card,
         sv.backup_dest,sv.backup_available,sv.backup_found,
+        sv.data_on,sv.data_state,sv.data_moving,sv.data_conflicts,
         idle_stage_name(st->idle_stage),
         st->last_wake_reason,
         st->last_sleep_elapsed_ms,
@@ -1328,6 +1341,13 @@ static void handle_command(struct client *c, struct runtime_state *st, const cha
         if(run_argv(argv)!=0){(void)write_all(c->fd,!strcmp(val,"EJECT")?"ERR busy\n":"ERR failed\n");return;}
         (void)write_all(c->fd,"OK\n"); notify_subscribers(); return;
     }
+    /* Data on SD2 with the card gone for good: a category back on SD1
+     * (the moves themselves are the storage-data-move job). */
+    if(sscanf(line,"STORAGE DATA FORGET %15s",val)==1){
+        char *argv[]={"/usr/sbin/nuubos-storagectl","data","forget",val,NULL};
+        if(run_argv(argv)!=0){(void)write_all(c->fd,"ERR failed\n");return;}
+        (void)write_all(c->fd,"OK\n"); notify_subscribers(); return;
+    }
     if(!strcmp(line,"STORAGE BACKUP ARCHIVE")){
         char *argv[]={"/usr/sbin/nuubos-sd2-backup","archive",NULL};
         if(run_argv(argv)!=0){(void)write_all(c->fd,"ERR failed\n");return;}
@@ -1464,9 +1484,13 @@ int main(void)
                 continue;
             }
             int i=map[j];
-            if(pf[j].revents&(POLLHUP|POLLERR)){
+            /* A command and its hang-up can come in one wake (storage-changed
+             * writes and closes): read first, the read of the end closes. */
+            if(pf[j].revents&POLLIN){
+                service_client(&clients[i],&st);
+            }else if(pf[j].revents&(POLLHUP|POLLERR)){
                 close(clients[i].fd);clients[i].fd=-1;clients[i].subscribed=false;clients[i].used=0;
-            }else service_client(&clients[i],&st);
+            }
         }
     }
 

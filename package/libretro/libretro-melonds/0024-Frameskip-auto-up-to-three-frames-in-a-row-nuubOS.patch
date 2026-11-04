@@ -1,0 +1,73 @@
+From: nuubOS <nuubos@localhost>
+Date: Thu, 29 Oct 2026 22:00:00 +0100
+Subject: [PATCH] Frameskip auto up to three frames in a row (nuubOS)
+
+melonds_frameskip gets auto_max, "Auto (up to 3)": the same rule as auto
+(the next frame is emulated without drawing while RetroArch's audio
+buffer runs low), up to three frames in a row instead of one, for those
+who prefer fewer frames at full speed (GitHub #23). Auto is unchanged.
+---
+ src/libretro/libretro.cpp            | 15 ++++++++++-----
+ src/libretro/libretro_core_options.h |  3 ++-
+ 2 files changed, 12 insertions(+), 6 deletions(-)
+
+diff --git a/src/libretro/libretro.cpp b/src/libretro/libretro.cpp
+--- a/src/libretro/libretro.cpp
++++ b/src/libretro/libretro.cpp
+@@ -64,9 +64,12 @@ const int SLOT_1_2_BOOT = 1;
+ static bool libretro_supports_option_categories = false;
+ 
+ /* Frameskip (nuubOS): auto skips drawing the next frame while RetroArch's
+- * audio buffer is below FRAMESKIP_THRESHOLD % or about to underrun. */
++ * audio buffer is below FRAMESKIP_THRESHOLD % or about to underrun, at most
++ * frameskip_max frames in a row (auto 1, auto_max 3). */
+ #define FRAMESKIP_THRESHOLD 33
+ static bool frameskip_auto = false;
++static unsigned frameskip_max = 1;
++static unsigned frames_skipped = 0;
+ static bool frameskip_cb_set = false;
+ static bool can_dupe = false;
+ static bool skip_current = false;
+@@ -484,7 +487,8 @@ static void check_variables(bool init)
+ 
+    var.key = "melonds_frameskip";
+    frameskip_auto = environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value &&
+-                    !strcmp(var.value, "auto");
++                    !strncmp(var.value, "auto", 4);
++   frameskip_max = frameskip_auto && !strcmp(var.value, "auto_max") ? 3 : 1;
+    if (!environ_cb(RETRO_ENVIRONMENT_GET_CAN_DUPE, &can_dupe))
+       can_dupe = false;
+    update_frameskip(frameskip_auto);
+@@ -1039,10 +1043,11 @@ void retro_run(void)
+    {
+       bool skip_next = false;
+ 
+-      /* never two in a row; never while the game captures the display
+-       * (it reads the pictures back) */
++      /* at most frameskip_max in a row; never while the game captures
++       * the display (it reads the pictures back) */
++      frames_skipped = skip_current ? frames_skipped + 1 : 0;
+       if (frameskip_auto && frameskip_cb_set && audio_buffer_active && can_dupe &&
+-          !skip_current && !(GPU::GPU2D_A.CaptureCnt & (1u << 31)))
++          frames_skipped < frameskip_max && !(GPU::GPU2D_A.CaptureCnt & (1u << 31)))
+          skip_next = audio_underrun_likely || audio_buffer_occupancy < FRAMESKIP_THRESHOLD;
+       if (!frameskip_auto)
+          skip_current = false;
+diff --git a/src/libretro/libretro_core_options.h b/src/libretro/libretro_core_options.h
+--- a/src/libretro/libretro_core_options.h
++++ b/src/libretro/libretro_core_options.h
+@@ -203,12 +203,13 @@ struct retro_core_option_v2_definition option_defs_us[] = {
+       "melonds_frameskip",
+       "Frameskip",
+       NULL,
+-      "Auto: when emulation falls behind (RetroArch's audio buffer running low) the next frame is emulated without drawing it, never two in a row. Emulation and audio keep full speed.",
++      "Auto: when emulation falls behind (RetroArch's audio buffer running low) the next frame is emulated without drawing it, never two in a row. Auto (up to 3) skips up to three frames in a row. Emulation and audio keep full speed.",
+       NULL,
+       "video",
+       {
+          { "disabled", NULL },
+          { "auto",     "Auto" },
++         { "auto_max", "Auto (up to 3)" },
+          { NULL, NULL },
+       },
+       "disabled"

@@ -1391,9 +1391,22 @@ fn adjust_audio_volume(
     ui: &QuickMenuWindow,
     delta: i32,
 ) -> Result<AudioSnapshot, Box<dyn std::error::Error>> {
-    /* VOLUME ADJUST is atomic in Product Audio and already returns a complete
-     * STATUS snapshot. Do not precede every 1% tick with another STATUS IPC. */
-    let reply = audio_command(&format!("VOLUME ADJUST {delta}"))?;
+    change_audio_volume(ui, &format!("VOLUME ADJUST {delta}"))
+}
+
+/* Vol+/Vol-: Product Audio applies the user's Volume Button Step (GitHub #6). */
+fn volume_key(ui: &QuickMenuWindow, up: bool) -> Result<AudioSnapshot, Box<dyn std::error::Error>> {
+    change_audio_volume(ui, if up { "VOLUME KEY UP" } else { "VOLUME KEY DOWN" })
+}
+
+fn change_audio_volume(
+    ui: &QuickMenuWindow,
+    command: &str,
+) -> Result<AudioSnapshot, Box<dyn std::error::Error>> {
+    /* VOLUME ADJUST/KEY are atomic in Product Audio and already return a
+     * complete STATUS snapshot. Do not precede every tick with another
+     * STATUS IPC. */
+    let reply = audio_command(command)?;
     if reply.starts_with("unsupported") {
         let snapshot = read_audio_snapshot();
         apply_audio_snapshot(ui, &snapshot);
@@ -1406,8 +1419,8 @@ fn adjust_audio_volume(
     let after = parse_audio_snapshot(&reply);
     apply_audio_snapshot(ui, &after);
     append_action_log(&format!(
-        "volume-change output={} delta={} value={}",
-        after.selected, delta, after.volume
+        "volume-change output={} command={} value={}",
+        after.selected, command, after.volume
     ));
     Ok(after)
 }
@@ -2808,6 +2821,7 @@ struct GameSnapshot {
     /* melonDS-nuubOS: screen layout index (None for other cores) and
      * whether the stylus mode is on (Stylus / Screen Layout rows). */
     nds_layout: Option<i32>,
+    nds_corner: i32,
     stylus: bool,
     /* Multi-disc game: the disc in use (0-based) and how many (0 = no
      * disc control; read by emud when the menu opens). */
@@ -2838,6 +2852,7 @@ fn parse_game_snapshot(reply: &str) -> GameSnapshot {
             Some(("nds_layout", value)) => {
                 snapshot.nds_layout = value.parse::<i32>().ok().filter(|v| (0..4).contains(v))
             }
+            Some(("nds_corner", value)) => snapshot.nds_corner = value.parse::<i32>().ok().filter(|v| (0..4).contains(v)).unwrap_or(0),
             Some(("stylus", value)) => snapshot.stylus = value != "off",
             Some(("disc", value)) => snapshot.disc = value.parse().unwrap_or(0),
             Some(("discs", value)) => snapshot.discs = value.parse().unwrap_or(0),
@@ -2857,6 +2872,9 @@ fn parse_game_snapshot(reply: &str) -> GameSnapshot {
  * (right stick, else left stick, else D-pad). */
 const STYLUS_ROW: i32 = 42;
 const LAYOUT_ROW: i32 = 43;
+/* Small Screen Position, Picture in Picture only (GitHub #5). */
+const CORNER_ROW: i32 = 52;
+const NDS_PIP: i32 = 2;
 /* GAME → Disc (51) of a multi-disc game (.m3u), where Stylus would be:
  * the disc dropdown; a choice goes back to the game, emud changes the
  * disc with the tray open for a moment (RC4 feature, EPIC-005/019). */
@@ -2874,6 +2892,16 @@ fn toggle_stylus(ui: &QuickMenuWindow) {
         .unwrap_or_else(|| "right".to_owned());
     if let Err(error) = emulation_command(&format!("HOTKEY\tstylus {control}")) {
         eprintln!("quick-menu: game stylus failed={error}");
+    }
+    apply_game_snapshot(ui, &read_game_snapshot());
+}
+
+/* Picture in Picture corner (GitHub #5): emud saves it for the game and
+ * applies it live. */
+fn step_nds_corner(ui: &QuickMenuWindow, step: i32) {
+    let corner = (ui.get_game_nds_corner() + step).rem_euclid(4);
+    if let Err(error) = emulation_command(&format!("NDS_CORNER\t{corner}")) {
+        eprintln!("quick-menu: game NDS_CORNER failed={error}");
     }
     apply_game_snapshot(ui, &read_game_snapshot());
 }
@@ -3105,12 +3133,15 @@ fn read_game_snapshot() -> GameSnapshot {
 
 fn apply_game_snapshot(ui: &QuickMenuWindow, snapshot: &GameSnapshot) {
     let selected = ui.get_selected_index();
-    if !snapshot.running && ((8..TASK_ROW).contains(&selected) || matches!(selected, STYLUS_ROW | LAYOUT_ROW | DISC_ROW)) {
+    if !snapshot.running && ((8..TASK_ROW).contains(&selected) || matches!(selected, STYLUS_ROW | LAYOUT_ROW | CORNER_ROW | DISC_ROW)) {
         ui.set_selected_index(3);
     }
     let nds = snapshot.running && snapshot.nds_layout.is_some();
-    if !nds && matches!(ui.get_selected_index(), STYLUS_ROW | LAYOUT_ROW) {
+    if !nds && matches!(ui.get_selected_index(), STYLUS_ROW | LAYOUT_ROW | CORNER_ROW) {
         ui.set_selected_index(8);
+    }
+    if nds && snapshot.nds_layout != Some(NDS_PIP) && ui.get_selected_index() == CORNER_ROW {
+        ui.set_selected_index(LAYOUT_ROW);
     }
     if !nds {
         ui.set_game_layout_dropdown_open(false);
@@ -3128,6 +3159,7 @@ fn apply_game_snapshot(ui: &QuickMenuWindow, snapshot: &GameSnapshot) {
         format_arg2(&tr(ui, 1401, "{0} of {1}"), &(snapshot.disc + 1).to_string(), &discs.to_string()).into(),
     );
     ui.set_game_nds_layout(snapshot.nds_layout.unwrap_or(0));
+    ui.set_game_nds_corner(snapshot.nds_corner);
     ui.set_game_stylus_on(nds && snapshot.stylus);
     if !snapshot.running {
         ui.set_game_confirm_index(-1);
@@ -4858,6 +4890,9 @@ fn selectable_menu_indices(ui: &QuickMenuWindow) -> Vec<i32> {
         }
         if ui.get_game_nds() {
             indices.extend_from_slice(&[STYLUS_ROW, LAYOUT_ROW]);
+            if ui.get_game_nds_layout() == NDS_PIP {
+                indices.push(CORNER_ROW);
+            }
         }
         if ui.get_game_discs() > 1 {
             indices.push(DISC_ROW);
@@ -5927,6 +5962,11 @@ fn activate_game_row(
             open_layout_dropdown(ui);
             return redraw_overlay(ui, queue, state, qh, conn);
         }
+        CORNER_ROW if ui.get_game_nds() => {
+            /* The next corner, applied live; the menu stays open. */
+            step_nds_corner(ui, 1);
+            return redraw_overlay(ui, queue, state, qh, conn);
+        }
         28 => {
             /* The user's Settings -> Gaming switch; emud applies it live.
              * The menu stays open (the overlay shows once it closes). */
@@ -6322,6 +6362,14 @@ fn handle_event(
             cycle_system_profile(ui, 1);
             redraw_overlay(ui, queue, state, qh, conn)?;
         }
+        "menu_left" | "menu_right" if *mapped
+            && !ui.get_lifecycle_active()
+            && ui.get_selected_index() == CORNER_ROW
+            && ui.get_game_nds() =>
+        {
+            step_nds_corner(ui, if event.action == "menu_left" { -1 } else { 1 });
+            redraw_overlay(ui, queue, state, qh, conn)?;
+        }
         "menu_left" if *mapped
             && !ui.get_lifecycle_active()
             && ui.get_selected_index() == 3
@@ -6650,8 +6698,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     if event.pressed
                         && (event.action == "volume_up" || event.action == "volume_down")
                     {
-                        let delta = if event.action == "volume_up" { 1 } else { -1 };
-                        match adjust_audio_volume(&ui, delta) {
+                        match volume_key(&ui, event.action == "volume_up") {
                             Ok(_) => {
                                 ui.set_volume_osd_visible(true);
                                 osd_deadline = Some(

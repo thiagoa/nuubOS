@@ -82,21 +82,50 @@
 #define WAYLAND_SOCKET RUN_ROOT "/wayland-runtime/wayland-0"
 #define PIPEWIRE_SOCKET RUN_ROOT "/pipewire/pipewire-0"
 
-#define PORTS_ROOT "/userdata/roms/ports"
-#define PORTMASTER_DIR PORTS_ROOT "/PortMaster"
+/* The console's own ports folder; the SD2 card's when the user chose it on
+ * the PortMaster page (GitHub #21): ports_root, as libraryd resolves it
+ * (PORTS_ROOT), "" while that card is out. PortMaster and nuubOS's
+ * .nuubos live in it and move with it. */
+#define CONSOLE_PORTS "/userdata/roms/ports"
+#define LOCATION_FILE "/state/ports/location.conf"
+static char ports_root[PATH_MAX] = CONSOLE_PORTS;
+static bool ports_sd2;
+/* The SD2 card's ports folder whatever the setting ("" without the card). */
+static char sd2_ports[PATH_MAX];
+/* A move (LOCATION): its folders, its direction; the ports the last one
+ * left where they were (already at the destination), -1 before any. */
+static char move_from[PATH_MAX], move_to[PATH_MAX];
+static bool move_to_sd2;
+static int move_conflicts = -1;
+
+/* A path in the ports folder; a few at once are valid (rotating). */
+static const char *in_ports(const char *sub)
+{
+	static char buf[4][PATH_MAX];
+	static int k;
+
+	k = (k + 1) % 4;
+	snprintf(buf[k], sizeof(buf[k]), "%s%s", ports_root, sub);
+	return buf[k];
+}
+#define PORTMASTER_DIR in_ports("/PortMaster")
 /* nuubOS's PortMaster module in the image, and a line only its copies
  * carry (a release that ships its own module is never touched). */
 #ifndef MOD_SOURCE
 #define MOD_SOURCE "/usr/share/nuubos/ports/mod_nuubOS.txt"
 #endif
-#define MOD_INSTALLED PORTMASTER_DIR "/mod_nuubOS.txt"
+#define MOD_INSTALLED in_ports("/PortMaster/mod_nuubOS.txt")
 #define MOD_MARK "controllers are the nuubOS virtual gamepads"
 /* nuubOS's own files in the ports folder (dot folder: not a port). */
-#define STATE_DIR PORTS_ROOT "/.nuubos"
-#define HOME_DIR STATE_DIR "/home"
-#define PREVIOUS_DIR STATE_DIR "/previous"
-#define PORTS_CONF STATE_DIR "/nuubos.conf"
+#define STATE_DIR in_ports("/.nuubos")
+#define HOME_DIR in_ports("/.nuubos/home")
+#define PREVIOUS_DIR in_ports("/.nuubos/previous")
+#define PORTS_CONF in_ports("/.nuubos/nuubos.conf")
+/* The SD2 card is mounted noexec: a session's view of its ports folder is
+ * a bind of it here with exec (still nosuid, nodev), for the sandbox only. */
+#define SD2_PORTS_MOUNT RUN_ROOT "/ports-sd2"
 #define PORTMASTER_GET "/usr/lib/nuubos/nuubos-portmaster-get"
+#define PORTS_MOVE "/usr/lib/nuubos/nuubos-ports-move"
 
 /* The sandbox's view. */
 #define SB_PORTS "/roms/ports"
@@ -137,7 +166,8 @@
 /* RetroArch-based ports (libretro cores run by /usr/bin/retroarch) use
  * this configuration: fullscreen (windowed, RetroArch draws its own title
  * bar). */
-#define RA_CONFIG HOME_DIR "/.config/retroarch/retroarch.cfg"
+#define RA_CONFIG in_ports("/.nuubos/home/.config/retroarch/retroarch.cfg")
+#define RA_CONFIG_TMP in_ports("/.nuubos/home/.config/retroarch/retroarch.cfg.tmp")
 
 enum job_kind {
 	JOB_NONE = 0,
@@ -145,6 +175,7 @@ enum job_kind {
 	JOB_INSTALL,  /* nuubos-portmaster-get install */
 	JOB_REMOVE,   /* nuubos-portmaster-get remove */
 	JOB_ROLLBACK, /* nuubos-portmaster-get rollback */
+	JOB_MOVE,     /* nuubos-ports-move: Ports on SD2 switched */
 	JOB_SESSION,  /* bwrap: PortMaster or a port */
 };
 
@@ -354,10 +385,11 @@ static size_t read_small(const char *path, char *buf, size_t size)
 static void refresh_mod(void)
 {
 	static char shipped[65536], installed[65536];
-	char tmp[] = MOD_INSTALLED ".tmp";
+	char tmp[PATH_MAX];
 	size_t n = read_small(MOD_SOURCE, shipped, sizeof(shipped));
 	FILE *fp;
 
+	snprintf(tmp, sizeof(tmp), "%s.tmp", MOD_INSTALLED);
 	if (!n || !read_small(MOD_INSTALLED, installed, sizeof(installed)) ||
 	    !strstr(installed, MOD_MARK) || !strcmp(installed, shipped))
 		return;
@@ -375,7 +407,7 @@ static void refresh_mod(void)
 static void read_portmaster(void)
 {
 	/* version alone (an interrupted removal) is not an installation. */
-	if (access(PORTMASTER_DIR "/PortMaster.sh", R_OK) == 0) {
+	if (ports_root[0] && access(in_ports("/PortMaster/PortMaster.sh"), R_OK) == 0) {
 		read_version_file(PORTMASTER_DIR, pm_version, sizeof(pm_version));
 		refresh_mod();
 	} else {
@@ -400,9 +432,12 @@ static void load_conf(void)
 
 static int save_conf(void)
 {
-	char tmp[] = PORTS_CONF ".tmp";
+	char tmp[PATH_MAX];
 	FILE *fp;
 
+	if (!ports_root[0])
+		return -1;
+	snprintf(tmp, sizeof(tmp), "%s.tmp", PORTS_CONF);
 	if (mkdir_p(STATE_DIR) != 0)
 		return -1;
 	fp = fopen(tmp, "w");
@@ -414,6 +449,122 @@ static int save_conf(void)
 		return -1;
 	}
 	return 0;
+}
+
+/* The PortMaster page's Ports on SD2 (GitHub #21). */
+static bool location_sd2(void)
+{
+	char line[64];
+	bool sd2 = false;
+	FILE *fp = fopen(LOCATION_FILE, "r");
+
+	if (!fp)
+		return false;
+	while (fgets(line, sizeof(line), fp))
+		if (!strncmp(line, "LOCATION=sd2", 12))
+			sd2 = true;
+	fclose(fp);
+	return sd2;
+}
+
+/* A slot for an SD2 card (the storage status says "none" without one). */
+static bool sd2_slot(void)
+{
+	char line[128];
+	bool slot = false;
+	FILE *fp = fopen(RUN_ROOT "/storage/sd2.status", "r");
+
+	if (!fp)
+		return false;
+	while (fgets(line, sizeof(line), fp))
+		if (!strncmp(line, "SD2_STATE=", 10))
+			slot = strncmp(line + 10, "none", 4) != 0;
+	fclose(fp);
+	return slot;
+}
+
+/* The setting, on STATE (out of the sandbox's reach). */
+static int save_location(bool sd2)
+{
+	char tmp[] = LOCATION_FILE ".tmp";
+	bool ok;
+	FILE *fp;
+
+	if (mkdir_p("/state/ports") != 0 || !(fp = fopen(tmp, "w")))
+		return -1;
+	fprintf(fp, "LOCATION=%s\n", sd2 ? "sd2" : "console");
+	ok = fflush(fp) == 0 && fsync(fileno(fp)) == 0;
+	if (fclose(fp) != 0 || !ok || rename(tmp, LOCATION_FILE) != 0) {
+		unlink(tmp);
+		return -1;
+	}
+	return 0;
+}
+
+static bool sd2_mounted;
+
+static void release_sd2_mount(void)
+{
+	if (sd2_mounted && umount2(SD2_PORTS_MOUNT, MNT_DETACH) != 0)
+		log_msg("portsd: umount %s: %s", SD2_PORTS_MOUNT, strerror(errno));
+	sd2_mounted = false;
+}
+
+/* What the sandbox binds as /roms/ports: the ports folder, or on the SD2
+ * card (noexec) its bind with exec; NULL when that fails. */
+static const char *sandbox_ports(void)
+{
+	if (!ports_sd2)
+		return ports_root;
+	if (sd2_mounted)
+		return SD2_PORTS_MOUNT;
+	if (mkdir(SD2_PORTS_MOUNT, 0700) != 0 && errno != EEXIST)
+		return NULL;
+	if (mount(ports_root, SD2_PORTS_MOUNT, NULL, MS_BIND, NULL) != 0) {
+		log_msg("portsd: bind %s: %s", ports_root, strerror(errno));
+		return NULL;
+	}
+	if (mount(NULL, SD2_PORTS_MOUNT, NULL, MS_REMOUNT | MS_BIND | MS_NOSUID | MS_NODEV, NULL) != 0) {
+		log_msg("portsd: exec remount %s: %s", SD2_PORTS_MOUNT, strerror(errno));
+		umount2(SD2_PORTS_MOUNT, MNT_DETACH);
+		return NULL;
+	}
+	sd2_mounted = true;
+	return SD2_PORTS_MOUNT;
+}
+
+static void library_request(const char *command, char *answer, size_t size);
+
+/* The ports folder from libraryd (one owner of the card paths), else from
+ * the setting alone; PortMaster's state and settings are the folder's. Only
+ * while nothing runs in it. */
+static void refresh_ports_root(void)
+{
+	char answer[PATH_MAX + 32], old[PATH_MAX];
+	char *tab;
+
+	copy_text(old, sizeof(old), ports_root);
+	library_request("PORTS_ROOT", answer, sizeof(answer));
+	if (!strncmp(answer, "OK ", 3) && (tab = strchr(answer + 3, '\t')) != NULL) {
+		char *sd2 = strchr(tab + 1, '\t');
+
+		*tab = '\0';
+		if (sd2)
+			*sd2++ = '\0';
+		ports_sd2 = !strcmp(answer + 3, "sd2");
+		copy_text(ports_root, sizeof(ports_root), tab + 1);
+		copy_text(sd2_ports, sizeof(sd2_ports), sd2 ? sd2 : "");
+	} else {
+		ports_sd2 = location_sd2();
+		copy_text(ports_root, sizeof(ports_root), ports_sd2 ? "" : CONSOLE_PORTS);
+		sd2_ports[0] = '\0';
+	}
+	if (strcmp(old, ports_root)) {
+		log_msg("portsd: ports folder %s", ports_root[0] ? ports_root : "(SD2 card out)");
+		release_sd2_mount();
+	}
+	load_conf();
+	read_portmaster();
 }
 
 /* PortMaster releases are dates: "2026.10.24-1611" > "2026.06.23-0015". */
@@ -445,7 +596,7 @@ static int pm_job(void)
 {
 	for (int i = 0; i < MAX_JOBS; i++)
 		if (jobs[i].kind == JOB_CHECK || jobs[i].kind == JOB_INSTALL ||
-		    jobs[i].kind == JOB_REMOVE || jobs[i].kind == JOB_ROLLBACK)
+		    jobs[i].kind == JOB_REMOVE || jobs[i].kind == JOB_ROLLBACK || jobs[i].kind == JOB_MOVE)
 			return i;
 	return -1;
 }
@@ -463,6 +614,8 @@ static const char *pm_job_name(void)
 		return "installing";
 	case JOB_ROLLBACK:
 		return "rolling-back";
+	case JOB_MOVE:
+		return "moving";
 	default:
 		return "removing";
 	}
@@ -510,6 +663,10 @@ static char *build_status(size_t *len_out)
 	APPEND("portmaster_error=%s\n", pm_error);
 	APPEND("portmaster_previous=%s\n", pm_previous);
 	APPEND("portmaster_auto_update=%d\n", pm_auto_update ? 1 : 0);
+	/* Ports on SD2 (GitHub #21): offered with a card slot; "ready" = the
+	 * folder is there (its card in). */
+	APPEND("ports_location=%s\nports_ready=%d\nports_sd2_slot=%d\nports_conflicts=%d\n",
+	       ports_sd2 ? "sd2" : "console", ports_root[0] ? 1 : 0, sd2_slot() ? 1 : 0, move_conflicts);
 	APPEND("end=1\n");
 #undef APPEND
 	*len_out = used;
@@ -772,6 +929,10 @@ static int set_media_access(const char *port, bool on)
 	return rename(MEDIA_ACCESS_FILE ".tmp", MEDIA_ACCESS_FILE);
 }
 
+/* The host folder bound as /roms/ports (sandbox_ports(), set before the
+ * fork). */
+static char sandbox_src[PATH_MAX];
+
 static void sandbox_exec(const char *script)
 {
 	const char *port = strrchr(script, '/') ? strrchr(script, '/') + 1 : script;
@@ -834,7 +995,7 @@ static void sandbox_exec(const char *script)
 	ARG3("--ro-bind-try", BATTERY_FILE, "/tmp/battery.percent");
 	/* Of USERDATA, the ports folder only. */
 	ARG2("--dir", "/roms");
-	ARG3("--bind", PORTS_ROOT, SB_PORTS);
+	ARG3("--bind", sandbox_src, SB_PORTS);
 	/* Read only, and only for a port the user allowed (never PortMaster's
 	 * own interface). */
 	if (strcmp(port, "PortMaster.sh") && media_access(port)) {
@@ -925,9 +1086,9 @@ static void retroarch_fullscreen(void)
 	FILE *out;
 	bool found = false;
 
-	if (mkdir_p(HOME_DIR "/.config/retroarch") != 0)
+	if (mkdir_p(in_ports("/.nuubos/home/.config/retroarch")) != 0)
 		return;
-	out = fopen(RA_CONFIG ".tmp", "w");
+	out = fopen(RA_CONFIG_TMP, "w");
 	if (!out) {
 		if (in)
 			fclose(in);
@@ -946,7 +1107,7 @@ static void retroarch_fullscreen(void)
 	if (in)
 		fclose(in);
 	if (fclose(out) == 0)
-		(void)rename(RA_CONFIG ".tmp", RA_CONFIG);
+		(void)rename(RA_CONFIG_TMP, RA_CONFIG);
 }
 
 /* The built-in panel at its native resolution while a session runs
@@ -982,7 +1143,7 @@ static bool session_relaunch(int status)
 	if (session.portmaster || session.user_quit || session.relaunched ||
 	    session.power_client >= 0 || status == 0 || !session.port[0])
 		return false;
-	snprintf(host, sizeof(host), PORTS_ROOT "/%s", session.port);
+	snprintf(host, sizeof(host), "%s/%s", ports_root, session.port);
 	if (stat(host, &st) != 0)
 		return false;
 	return st.st_mtime != session.script_mtime || st.st_size != session.script_size;
@@ -1022,6 +1183,9 @@ static const char *launch_session(const char *port)
 
 	if (session.state != SESSION_IDLE)
 		return "busy";
+	/* The folder now (an SD2 card may have come or gone). */
+	if (pm_job() < 0)
+		refresh_ports_root();
 	if (!pm_version[0])
 		return "unavailable";
 	/* Install, removal or rollback change PortMaster's files; a check
@@ -1037,7 +1201,7 @@ static const char *launch_session(const char *port)
 		if (len < 4 || len >= sizeof(session.port) || strcmp(port + len - 3, ".sh") != 0 ||
 		    strchr(port, '/') || port[0] == '.')
 			return "port";
-		snprintf(host, sizeof(host), PORTS_ROOT "/%s", port);
+		snprintf(host, sizeof(host), "%s/%s", ports_root, port);
 		if (stat(host, &st) != 0 || !S_ISREG(st.st_mode))
 			return "port";
 		snprintf(script, sizeof(script), SB_PORTS "/%s", port);
@@ -1049,6 +1213,9 @@ static const char *launch_session(const char *port)
 	slot = free_job();
 	if (slot < 0)
 		return "busy";
+	if (!sandbox_ports())
+		return "sandbox";
+	copy_text(sandbox_src, sizeof(sandbox_src), sandbox_ports());
 
 	session.input_fd = input_gamepads_on();
 	if (session.input_fd < 0)
@@ -1134,14 +1301,31 @@ static void finish_power_wait(void)
 
 static void process_input_link(void)
 {
+	static char line[64];
+	static size_t used;
 	char buf[128];
 	ssize_t n = read(session.input_fd, buf, sizeof(buf));
 
-	/* Hotkeys (emulation chords) mean nothing to a port: ignored. */
 	if (n == 0 || (n < 0 && errno != EAGAIN && errno != EINTR)) {
 		/* inputd restarted: take the gamepads again. */
 		close(session.input_fd);
+		used = 0;
 		session.input_fd = input_gamepads_on();
+		return;
+	}
+	/* Quit (H + Start) ends the port like a game; the other emulation
+	 * chords mean nothing to a port: ignored. */
+	for (ssize_t i = 0; i < n; i++) {
+		if (buf[i] == '\n') {
+			line[used] = '\0';
+			if (!strcmp(line, "HOTKEY quit"))
+				request_quit();
+			used = 0;
+		} else if (used + 1 < sizeof(line)) {
+			line[used++] = buf[i];
+		} else {
+			used = 0;
+		}
 	}
 }
 
@@ -1458,17 +1642,23 @@ static bool start_pm_job(enum job_kind kind)
 	case JOB_INSTALL:
 		/* No overall limit: the helper aborts a stalled download. */
 		argv[1] = (char *)"install";
-		argv[2] = (char *)PORTS_ROOT;
+		argv[2] = ports_root;
 		break;
 	case JOB_REMOVE:
 		argv[1] = (char *)"remove";
-		argv[2] = (char *)PORTS_ROOT;
+		argv[2] = ports_root;
 		timeout = REMOVE_TIMEOUT_MS;
 		break;
 	case JOB_ROLLBACK:
 		argv[1] = (char *)"rollback";
-		argv[2] = (char *)PORTS_ROOT;
+		argv[2] = ports_root;
 		timeout = REMOVE_TIMEOUT_MS;
+		break;
+	case JOB_MOVE:
+		/* No overall limit: gigabytes of ports on a slow card. */
+		argv[0] = (char *)PORTS_MOVE;
+		argv[1] = move_from;
+		argv[2] = move_to;
 		break;
 	default:
 		return false;
@@ -1614,6 +1804,24 @@ static void finish_job(int slot, int status)
 		log_msg("portsd: portmaster install status=%d error=%s version=%s", status,
 			j->error[0] ? j->error : "-", pm_version[0] ? pm_version : "-");
 		break;
+	case JOB_MOVE:
+		pm_progress = -1;
+		if (j->ok && exited_ok) {
+			char answer[16];
+
+			move_conflicts = atoi(j->result);
+			/* The folder the ports are in now. */
+			if (save_location(move_to_sd2) != 0)
+				copy_text(pm_error, sizeof(pm_error), "write");
+			pm_latest[0] = '\0';
+			library_request("SCAN", answer, sizeof(answer));
+			refresh_ports_root();
+		} else if (strcmp(j->error, "cancelled") != 0) {
+			copy_text(pm_error, sizeof(pm_error), j->error[0] ? j->error : "write");
+		}
+		log_msg("portsd: ports move %s -> %s status=%d error=%s conflicts=%d", move_from, move_to, status,
+			j->error[0] ? j->error : "-", move_conflicts);
+		break;
 	case JOB_ROLLBACK:
 	case JOB_REMOVE:
 		read_portmaster();
@@ -1645,6 +1853,7 @@ static void finish_job(int slot, int status)
 			break;
 		}
 		panel_native(false);
+		release_sd2_mount();
 		/* PortMaster may have updated itself. */
 		read_portmaster();
 		/* Ports it installed or removed reach Home now, not at the next
@@ -1759,11 +1968,11 @@ static void handle_command(struct client *c, char *line)
 		 * is gone is just not there. */
 		if (strncmp(answer, "OK ports\t", 9) != 0)
 			error = "game";
-		else if (strncmp((path = answer + 9), PORTS_ROOT "/", sizeof(PORTS_ROOT)) != 0 ||
-			 strchr(path + sizeof(PORTS_ROOT), '/'))
+		else if (!ports_root[0] || strncmp((path = answer + 9), ports_root, strlen(ports_root)) != 0 ||
+			 path[strlen(ports_root)] != '/' || strchr(path + strlen(ports_root) + 1, '/'))
 			error = "port";
 		else
-			name = path + sizeof(PORTS_ROOT);
+			name = path + strlen(ports_root) + 1;
 		if (!error)
 			error = launch_session(name);
 		if (error) {
@@ -1825,6 +2034,13 @@ static void handle_command(struct client *c, char *line)
 			reply(c, "ERR busy\n");
 			return;
 		}
+		refresh_ports_root();
+		/* Ports on an SD2 card that is out (GitHub #21). */
+		if (!ports_root[0] || (kind == JOB_INSTALL && mkdir_p(ports_root) != 0)) {
+			reply(c, "ERR card\n");
+			notify_subscribers();
+			return;
+		}
 		if (kind == JOB_ROLLBACK && !pm_previous[0]) {
 			reply(c, "ERR unavailable\n");
 			return;
@@ -1840,12 +2056,54 @@ static void handle_command(struct client *c, char *line)
 	} else if (!strcmp(line, "PM_CANCEL")) {
 		int i = pm_job();
 
-		if (i >= 0 && jobs[i].kind == JOB_INSTALL && !jobs[i].term_sent) {
+		if (i >= 0 && (jobs[i].kind == JOB_INSTALL || jobs[i].kind == JOB_MOVE) && !jobs[i].term_sent) {
 			kill(-jobs[i].pid, SIGTERM);
 			jobs[i].term_sent = true;
 			jobs[i].deadline_ms = monotonic_ms() + KILL_TIMEOUT_MS;
 		}
 		reply(c, "OK\n");
+	} else if (!strcmp(line, "LOCATION") && argc == 1) {
+		/* LOCATION console|sd2 (PortMaster page, GitHub #21): the ports
+		 * and PortMaster move to that card (nuubos-ports-move, a job like
+		 * a download, PM_CANCEL stops it), then are used there. Never
+		 * under a session or another job; both cards must be in. */
+		bool sd2 = !strcmp(args[0], "sd2");
+
+		if (!sd2 && strcmp(args[0], "console")) {
+			reply(c, "ERR location\n");
+			return;
+		}
+		if (pm_job() >= 0 || session.state != SESSION_IDLE) {
+			reply(c, "ERR busy\n");
+			return;
+		}
+		refresh_ports_root();
+		if (sd2 == ports_sd2) {
+			reply(c, "OK\n");
+			return;
+		}
+		if (!ports_root[0] || !sd2_ports[0]) {
+			reply(c, "ERR card\n");
+			return;
+		}
+		copy_text(move_from, sizeof(move_from), ports_root);
+		copy_text(move_to, sizeof(move_to), sd2 ? sd2_ports : CONSOLE_PORTS);
+		move_to_sd2 = sd2;
+		if (!start_pm_job(JOB_MOVE)) {
+			reply(c, "ERR spawn\n");
+			return;
+		}
+		pm_error[0] = '\0';
+		pm_progress = 0;
+		move_conflicts = -1;
+		reply(c, "OK\n");
+		notify_subscribers();
+	} else if (!strcmp(line, "REFRESH")) {
+		/* The PortMaster page opens: an SD2 card may have come or gone. */
+		if (pm_job() < 0 && session.state == SESSION_IDLE)
+			refresh_ports_root();
+		reply(c, "OK\n");
+		notify_subscribers();
 	} else if (!strcmp(line, "PM_AUTO_UPDATE") && argc == 1) {
 		pm_auto_update = strcmp(args[0], "0") != 0;
 		reply(c, save_conf() == 0 ? "OK\n" : "ERR write\n");
@@ -1978,8 +2236,7 @@ int main(void)
 	signal(SIGPIPE, SIG_IGN);
 
 	setup_cgroup();
-	load_conf();
-	read_portmaster();
+	refresh_ports_root();
 
 	server = make_server(SOCKET_PATH, 0660);
 	/* Reached from the sandbox (root inside, root's socket outside);

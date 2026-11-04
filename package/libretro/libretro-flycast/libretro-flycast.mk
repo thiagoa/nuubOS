@@ -7,7 +7,7 @@
 # Flycast (Sega Dreamcast / NAOMI): Cortex-A53 GLES profile, arm64 dynarec,
 # low-end settings. Pinned upstream commit; part of the default H700 core
 # matrix (package/libretro/README.md).
-# Bundled as Flycast-nuubOS (flycast_nuubos): patches 0002-0012 are nuubOS
+# Bundled as Flycast-nuubOS (flycast_nuubos): patches 0002-0013 are nuubOS
 # H700 performance work (docs/dev/emulation.md "Flycast-nuubOS"). Unlike
 # the other nuubOS cores there is no upstream download next to it: the
 # aarch64 buildbot Flycast needs desktop OpenGL and libgomp.

@@ -174,13 +174,13 @@ Signed-off-by: nuubOS Project <noreply@nuubos.invalid>
 +{
 +	struct rg35xx_pro_haptics *h = input_get_drvdata(input);
 +
-+	mutex_lock(&h->lock);
++	u16 level = effect->u.rumble.strong_magnitude;
 +
-+	h->level = effect->u.rumble.strong_magnitude;
-+	if (!h->level)
-+		h->level = effect->u.rumble.weak_magnitude;
-+
-+	mutex_unlock(&h->lock);
++	/* Called under the input device's event lock (atomic): no mutex
++	 * here, the work applies the level under h->lock. */
++	if (!level)
++		level = effect->u.rumble.weak_magnitude;
++	WRITE_ONCE(h->level, level);
 +
 +	schedule_work(&h->play_work);
 +

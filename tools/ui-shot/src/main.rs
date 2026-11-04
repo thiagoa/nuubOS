@@ -219,6 +219,16 @@ fn quick_menu(win: &Rc<MinimalSoftwareWindow>) {
         shot(win, w, h, "qm_game_nds_layout_dropdown");
     }
     qm.set_game_layout_dropdown_open(false);
+    /* Picture in Picture: Small Screen Position (52) under Screen Layout
+     * (GitHub #5). */
+    qm.set_game_nds_layout(2);
+    qm.set_game_nds_corner(3);
+    qm.set_selected_index(52);
+    for (w, h) in sizes {
+        shot(win, w, h, "qm_game_nds_corner");
+    }
+    qm.set_game_nds_corner(0);
+    qm.set_game_nds_layout(1);
     qm.set_game_nds(false);
     /* Multi-disc game: Disc (51) where Stylus would be, then its dropdown. */
     qm.set_game_discs(3);
@@ -615,20 +625,22 @@ fn main() {
         })),
         ("display_audio", Box::new(|ui| { ui.set_settings_selected_index(4); ui.set_settings_view(18); ui.set_display_audio_index(2); ui.set_display_audio_scroll_offset(0); })),
         /* Home Music off (user request 2026-10-28): the toggle focused, the volume dimmed. */
-        ("display_audio_music_off", Box::new(|ui| { ui.set_home_music_enabled(false); ui.set_display_audio_index(4); })),
-        ("display_audio_sounds", Box::new(|ui| { ui.set_home_music_enabled(true); ui.set_display_color_temperature_available(true); ui.set_display_audio_index(10); ui.set_display_audio_scroll_offset(6); })),
+        ("display_audio_music_off", Box::new(|ui| { ui.set_home_music_enabled(false); ui.set_display_audio_index(5); })),
+        /* Volume Button Step (GitHub #6) focused. */
+        ("display_audio_volume_step", Box::new(|ui| { ui.set_settings_open(true); ui.set_settings_selected_index(4); ui.set_settings_view(18); ui.set_volume_step(5); ui.set_display_audio_index(3); ui.set_display_audio_scroll_offset(0); })),
+        ("display_audio_sounds", Box::new(|ui| { ui.set_home_music_enabled(true); ui.set_display_color_temperature_available(true); ui.set_display_audio_index(11); ui.set_display_audio_scroll_offset(7); })),
         ("display_audio_cast", Box::new(|ui| {
             ui.set_settings_open(true); ui.set_settings_selected_index(4); ui.set_settings_view(18);
             ui.set_display_color_temperature_available(false);
             ui.set_cast_available(true); ui.set_cast_audio(true); ui.set_cast_latency("low".into());
             ui.set_cast_h264("installed".into()); ui.set_cast_encoder_value(s(ui, 1220).into());
-            ui.set_display_audio_index(12); ui.set_display_audio_scroll_offset(9);
+            ui.set_display_audio_index(13); ui.set_display_audio_scroll_offset(10);
         })),
         ("display_audio_cast_download", Box::new(|ui| {
             ui.set_settings_open(true); ui.set_settings_selected_index(4); ui.set_settings_view(18);
             ui.set_cast_available(true); ui.set_cast_latency("normal".into());
             ui.set_cast_h264("installing".into()); ui.set_cast_encoder_value(s(ui, 1221).replace("{0}", "42").into());
-            ui.set_display_audio_index(12); ui.set_display_audio_scroll_offset(9);
+            ui.set_display_audio_index(13); ui.set_display_audio_scroll_offset(10);
         })),
         ("system", Box::new(|ui| { ui.set_display_color_temperature_available(false); ui.set_settings_selected_index(6); ui.set_settings_view(19); ui.set_system_index(5); ui.set_system_scroll_offset(0); })),
         ("power", Box::new(|ui| { ui.set_settings_open(true); ui.set_settings_selected_index(5); ui.set_settings_view(69); ui.set_power_index(3); ui.set_power_scroll_offset(0); })),
@@ -656,6 +668,7 @@ fn main() {
                 (&s(ui, 1391), "", &s(ui, 1392), false, 0),
                 (&s(ui, 804), "", &s(ui, 805), false, -1),
                 (&s(ui, 792), "ScreenScraper", &s(ui, 793), true, -1),
+                (&s(ui, 1419), &s(ui, 1422), &s(ui, 1420), true, -1),
                 (&s(ui, 565), "nuubfan", &s(ui, 567), false, -1),
                 (&s(ui, 568), "", &s(ui, 569), false, -1), (&s(ui, 798), "", &s(ui, 799), false, -1),
                 (&s(ui, 576), "", &s(ui, 581), true, -1),
@@ -666,13 +679,15 @@ fn main() {
         })),
         ("gaming", Box::new(|ui| { ui.set_settings_selected_index(3); ui.set_settings_view(68); ui.set_gaming_index(3); })),
         ("gaming_retroarch", Box::new(|ui| { ui.set_gaming_index(8); })),
-        ("gaming_library", Box::new(|ui| { ui.set_gaming_index(13); })),
-        ("gaming_syncthing", Box::new(|ui| { ui.set_gaming_index(16); })),
+        ("gaming_library", Box::new(|ui| { ui.set_gaming_index(14); })),
+        /* Cover Region (GitHub #10). */
+        ("gaming_region", Box::new(|ui| { ui.set_gaming_index(11); })),
+        ("gaming_syncthing", Box::new(|ui| { ui.set_gaming_index(17); })),
         ("gaming_signout", Box::new(|ui| {
-            ui.set_gaming_index(11);
+            ui.set_gaming_index(12);
             /* Sign Out waits for its confirming press. */
             let rows = ui.get_gaming_rows();
-            if let Some(mut r) = rows.row_data(11) { r.armed = true; r.detail = s(ui, 191).into(); rows.set_row_data(11, r); }
+            if let Some(mut r) = rows.row_data(12) { r.armed = true; r.detail = s(ui, 191).into(); rows.set_row_data(12, r); }
         })),
         ("game_hotkeys", Box::new(|ui| {
             ui.set_gaming_index(0);
@@ -725,6 +740,16 @@ fn main() {
                 (5, s(ui, 560), false, false, false), (9, s(ui, 549), false, false, false), (10, s(ui, 544), false, false, true)]));
             ui.set_details_caption(s(ui, 546).into()); ui.set_details_caption_armed(true);
         })),
+        ("game_details_advanced_search", Box::new(|ui| {
+            /* GitHub #29: one Advanced Search action for the search name,
+             * system and Cover Region (page 51, game_settings_search). */
+            ui.set_gen_index(6); ui.set_details_desc_step(0);
+            ui.set_details_actions(actions(&[(0, s(ui, 413), true, false, false), (1, s(ui, 412), false, true, false),
+                (2, s(ui, 537), false, false, false), (35, s(ui, 1230), false, false, false), (3, s(ui, 524), false, false, false),
+                (5, s(ui, 560), false, false, false), (17, s(ui, 1473), false, false, false),
+                (9, s(ui, 549), false, false, false), (10, s(ui, 544), false, false, false)]));
+            ui.set_details_caption(s(ui, 801).replace("{0}", "Daytona USA").into()); ui.set_details_caption_armed(false);
+        })),
         ("game_details_bare", Box::new(|ui| {
             ui.set_gen_index(0);
             ui.set_details_title("cube".into()); ui.set_details_subtitle("PlayStation Portable".into());
@@ -757,14 +782,22 @@ fn main() {
                 (&s(ui, 526), "4:3", "", true, -1), (&s(ui, 527), &s(ui, 534), "", true, -1),
                 (&s(ui, 535), "", &s(ui, 536), false, -1)]));
         })),
+        ("game_settings_search", Box::new(|ui| {
+            ui.set_gen_index(1); ui.set_gen_section(s(ui, 1473).into()); ui.set_settings_search_page(true);
+            ui.set_details_title("Daytona USA".into()); ui.set_details_subtitle("PlayStation Portable".into());
+            ui.set_gen_rows(gen(&[(&s(ui, 800), "Daytona USA", &s(ui, 1474), true, -1),
+                (&s(ui, 1469), "Dreamcast", &s(ui, 1470), true, -1),
+                (&s(ui, 1419), &s(ui, 122), &s(ui, 1471).replace("{0}", &s(ui, 122)), true, -1)]));
+        })),
         ("game_settings_nds", Box::new(|ui| {
-            ui.set_gen_index(4);
+            ui.set_gen_index(4); ui.set_gen_section(s(ui, 524).into()); ui.set_settings_search_page(false);
             ui.set_details_title("Mario Kart DS".into());
             ui.set_details_subtitle("Nintendo DS".into());
             ui.set_gen_rows(gen(&[(&s(ui, 525), &s(ui, 528).replace("{0}", "melonds_nuubos"), "", true, -1),
                 (&s(ui, 1253), "", "", true, -1),
                 (&s(ui, 526), &s(ui, 528).replace("{0}", &s(ui, 531)), "", true, -1), (&s(ui, 527), &s(ui, 534), "", true, -1),
                 (&s(ui, 1314), &s(ui, 528).replace("{0}", &s(ui, 1315)), &s(ui, 1317), true, -1),
+                (&s(ui, 1464), &s(ui, 1465), &s(ui, 1466), true, -1),
                 (&s(ui, 535), "", &s(ui, 536), false, -1)]));
         })),
         ("game_settings_psx", Box::new(|ui| {
@@ -777,7 +810,64 @@ fn main() {
                 (&s(ui, 454), &s(ui, 528).replace("{0}", &s(ui, 52)), &s(ui, 1381), true, -1),
                 (&s(ui, 535), "", &s(ui, 536), false, -1)]));
         })),
+        /* System Settings (GitHub #12): a game inheriting its system, then
+         * the system's page inside the shell. */
+        ("game_settings_system", Box::new(|ui| {
+            ui.set_gen_index(0);
+            let sys = s(ui, 1448);
+            ui.set_gen_rows(gen(&[(&s(ui, 1452).replace("{0}", "PlayStation"), "", &s(ui, 1453), true, -1),
+                (&s(ui, 525), &sys.replace("{0}", "swanstation"), "", true, -1),
+                (&s(ui, 1253), "", "", true, -1),
+                (&s(ui, 526), &sys.replace("{0}", "4:3"), "", true, -1), (&s(ui, 527), &s(ui, 534), "", true, -1),
+                (&s(ui, 454), &sys.replace("{0}", &s(ui, 1380)), &s(ui, 1381), true, -1),
+                (&s(ui, 535), "", &s(ui, 536), false, -1)]));
+        })),
+        ("game_settings_system_page", Box::new(|ui| {
+            ui.set_gen_index(5); ui.set_settings_system_scope(true);
+            ui.set_gen_section(s(ui, 1452).replace("{0}", "PlayStation").into());
+            ui.set_gen_rows(gen(&[(&s(ui, 525), "swanstation", "", true, -1),
+                (&s(ui, 526), "4:3", "", true, -1), (&s(ui, 527), &s(ui, 528).replace("{0}", &s(ui, 532)), "", true, -1),
+                (&s(ui, 454), &s(ui, 1380), &s(ui, 1381), true, -1),
+                (&s(ui, 1450), "", &s(ui, 1449).replace("{0}", "3"), false, -1),
+                (&s(ui, 1451), "", &s(ui, 536), false, -1)]));
+        })),
+        /* Controls (user request 2026-10-29): a NES game whose top and
+         * left buttons press A and B, the B button following its system. */
+        ("game_controls", Box::new(|ui| {
+            ui.set_gen_index(2); ui.set_settings_system_scope(false);
+            ui.set_gen_section(s(ui, 1456).into());
+            let sys = s(ui, 1448);
+            let none = s(ui, 173);
+            ui.set_gen_rows(gen(&[(&s(ui, 337), &s(ui, 528).replace("{0}", "B"), "", true, -1),
+                (&s(ui, 338), &s(ui, 528).replace("{0}", "A"), "", true, -1),
+                (&s(ui, 339), "A", "", true, -1), (&s(ui, 340), &sys.replace("{0}", "B"), "", true, -1),
+                (&s(ui, 341), &s(ui, 528).replace("{0}", "↑"), "", true, -1),
+                (&s(ui, 342), &s(ui, 528).replace("{0}", "↓"), "", true, -1),
+                (&s(ui, 345), &s(ui, 528).replace("{0}", &none), "", true, -1),
+                (&s(ui, 1458), "", &s(ui, 536), false, -1)]));
+        })),
+        ("game_controls_choice", Box::new(|ui| {
+            ui.set_settings_choice_title(s(ui, 339).into());
+            let labels = [s(ui, 528).replace("{0}", &s(ui, 173)), "A".into(), "B".into(), s(ui, 352),
+                s(ui, 351), s(ui, 341), s(ui, 342), s(ui, 343), s(ui, 344), s(ui, 173)];
+            let o: Vec<SettingsChoiceEntry> = labels.iter()
+                .map(|l| SettingsChoiceEntry { value: "".into(), label: l.as_str().into() }).collect();
+            ui.set_settings_choice_options(ModelRc::from(Rc::new(VecModel::from(o))));
+            ui.set_settings_choice_index(1);
+            ui.set_settings_choice_open(true);
+        })),
+        ("game_controls_psx", Box::new(|ui| {
+            ui.set_settings_choice_open(false);
+            ui.set_gen_index(0);
+            let d = s(ui, 528);
+            ui.set_gen_rows(gen(&[(&s(ui, 337), &d.replace("{0}", &s(ui, 1459)), "", true, -1),
+                (&s(ui, 338), &d.replace("{0}", &s(ui, 1460)), "", true, -1),
+                (&s(ui, 339), &d.replace("{0}", &s(ui, 1461)), "", true, -1),
+                (&s(ui, 340), &d.replace("{0}", &s(ui, 1462)), "", true, -1),
+                (&s(ui, 351), &d.replace("{0}", &s(ui, 351)), "", true, -1)]));
+        })),
         ("game_settings_dreamcast", Box::new(|ui| {
+            ui.set_gen_section(s(ui, 524).into()); ui.set_settings_system_scope(false);
             ui.set_gen_index(4);
             ui.set_details_title("Dead or Alive 2".into());
             ui.set_details_subtitle("Dreamcast".into());
@@ -786,6 +876,7 @@ fn main() {
                 (&s(ui, 526), &s(ui, 528).replace("{0}", &s(ui, 531)), "", true, -1), (&s(ui, 527), &s(ui, 534), "", true, -1),
                 (&s(ui, 1314), &s(ui, 528).replace("{0}", &s(ui, 1316)), &s(ui, 1383), true, -1),
                 (&s(ui, 454), &s(ui, 528).replace("{0}", &s(ui, 1379)), &s(ui, 1382), true, -1),
+                (&s(ui, 1464), &s(ui, 528).replace("{0}", &s(ui, 1465)), &s(ui, 1466), true, -1),
                 (&s(ui, 535), "", &s(ui, 536), false, -1)]));
         })),
         ("game_settings_core_download", Box::new(|ui| {
@@ -809,11 +900,32 @@ fn main() {
                 ("Game Boy", &s(ui, 579), "", true, -1), ("Mega-CD / Sega CD", &s(ui, 577), &p, true, -1),
                 ("Neo Geo", &s(ui, 578), &p, true, -1), ("Atari Lynx", &s(ui, 579), "", true, -1)]));
         })),
+        /* Settings → Gaming → System Settings (76) and a system (77). */
+        ("systems_list", Box::new(|ui| {
+            ui.set_settings_open(true); ui.set_gen_select(true); ui.set_details_active(false);
+            ui.set_settings_selected_index(3); ui.set_settings_view(76); ui.set_gen_index(1); ui.set_gen_scroll(0);
+            ui.set_gen_split(0); ui.set_gen_notice("".into());
+            ui.set_gen_section(s(ui, 1454).into());
+            ui.set_gen_rows(gen(&[("Game Boy Advance", "mgba", "", true, -1), ("PlayStation", "swanstation", "", true, -1),
+                ("Nintendo 64", "parallel_n64_nuubos", "", true, -1), ("Dreamcast", "flycast_nuubos", "", true, -1),
+                ("Nintendo DS", "melonds_nuubos", "", true, -1)]));
+        })),
+        ("system_settings", Box::new(|ui| {
+            ui.set_settings_view(77); ui.set_gen_index(3);
+            ui.set_gen_section("Nintendo 64".into());
+            ui.set_gen_rows(gen(&[(&s(ui, 525), &s(ui, 528).replace("{0}", "parallel_n64_nuubos"), "", true, -1),
+                (&s(ui, 526), &s(ui, 528).replace("{0}", &s(ui, 531)), "", true, -1),
+                (&s(ui, 527), &s(ui, 528).replace("{0}", &s(ui, 532)), "", true, -1),
+                (&s(ui, 1339), &s(ui, 1341), &s(ui, 1342), true, -1),
+                (&s(ui, 454), &s(ui, 528).replace("{0}", &s(ui, 1379)), &s(ui, 1382), true, -1),
+                (&s(ui, 1451), "", &s(ui, 536), false, -1)]));
+        })),
         ("achievements", Box::new(|ui| {
-            ui.set_details_active(false); ui.set_settings_selected_index(3); ui.set_settings_view(54); ui.set_gen_index(2); ui.set_gen_scroll(0); ui.set_gen_split(0);
+            ui.set_settings_open(true); ui.set_gen_select(true); ui.set_details_active(false); ui.set_settings_selected_index(3); ui.set_settings_view(54); ui.set_gen_index(2); ui.set_gen_scroll(0); ui.set_gen_split(0);
             ui.set_gen_section(s(ui, 584).into()); ui.set_gen_notice("".into());
             ui.set_gen_rows(gen(&[(&s(ui, 588), "alice", "", false, -1), (&s(ui, 112), "", "", false, 1),
-                (&s(ui, 585), "", &s(ui, 586), false, 0), (&s(ui, 567), "", "", false, -1)]));
+                (&s(ui, 585), "", &s(ui, 586), false, 0), (&s(ui, 1445), "", &s(ui, 1446), false, 1),
+                (&s(ui, 567), "", "", false, -1)]));
         })),
         ("achievements_hardcore", Box::new(|ui| {
             ui.set_settings_dialog_title(s(ui, 907).into()); ui.set_settings_dialog_body(s(ui, 908).into());
@@ -883,6 +995,7 @@ fn main() {
                 (&s(ui, 924), "", "", false, -1),
                 (&s(ui, 926), "", &s(ui, 927), false, -1),
                 (&s(ui, 928), "", &s(ui, 929), false, -1),
+                (&s(ui, 1435), &s(ui, 54), &s(ui, 1439), true, -1),
                 (&s(ui, 625), "", "", true, -1)]));
         })),
         ("storage_format_armed", Box::new(|ui| {
@@ -897,8 +1010,43 @@ fn main() {
                 (&s(ui, 64), &s(ui, 916), "", false, -1),
                 (&s(ui, 625), "", "", true, -1)]));
         })),
+        /* Data on SD2 (storageui.rs page 75, GitHub #24). */
+        ("storage_data", Box::new(|ui| {
+            ui.set_settings_open(true); ui.set_details_active(false); ui.set_settings_selected_index(6);
+            ui.set_gen_select(true); ui.set_gen_split(0); ui.set_gen_split2(0);
+            ui.set_settings_view(75); ui.set_gen_index(2); ui.set_gen_scroll(0);
+            ui.set_gen_section(s(ui, 1435).to_uppercase().into());
+            ui.set_gen_rows(gen(&[
+                (&s(ui, 576), &s(ui, 912), "", false, -1), (&s(ui, 947), &s(ui, 64), "", false, -1),
+                (&s(ui, 948), &s(ui, 64), "", false, -1), (&s(ui, 951), &s(ui, 912), "", false, -1),
+                (&s(ui, 953), &s(ui, 912), &s(ui, 954), false, -1)]));
+        })),
+        ("storage_data_moving", Box::new(|ui| {
+            let rows = ui.get_gen_rows();
+            for i in 0..rows.row_count() {
+                if let Some(mut r) = rows.row_data(i) { r.enabled = false; rows.set_row_data(i, r); }
+            }
+            if let Some(mut r) = rows.row_data(4) {
+                r.value = s(ui, 1436).into(); r.progress_shown = true; r.progress = 0.37; rows.set_row_data(4, r);
+            }
+        })),
+        ("storage_data_offline", Box::new(|ui| {
+            ui.set_gen_rows(gen(&[
+                (&s(ui, 576), &s(ui, 912), "", false, -1), (&s(ui, 947), &s(ui, 64), &s(ui, 1437), false, -1),
+                (&s(ui, 948), &s(ui, 64), &s(ui, 1437), false, -1), (&s(ui, 951), &s(ui, 912), "", false, -1),
+                (&s(ui, 953), &s(ui, 912), &s(ui, 954), false, -1)]));
+            ui.set_gen_notice(s(ui, 1438).replace("{0}", "3").into());
+        })),
+        ("storage_data_forget", Box::new(|ui| {
+            ui.set_gen_notice("".into());
+            ui.set_settings_choice_open(true); ui.set_settings_choice_title(s(ui, 1440).into());
+            let o = vec![SettingsChoiceEntry { value: "forget".into(), label: s(ui, 1441).into() },
+                SettingsChoiceEntry { value: "cancel".into(), label: s(ui, 619).into() }];
+            ui.set_settings_choice_options(ModelRc::from(Rc::new(VecModel::from(o)))); ui.set_settings_choice_index(1);
+        })),
         /* Backup (filesui.rs page 62): the console backup only (storageui.rs). */
         ("backup", Box::new(|ui| {
+            ui.set_settings_choice_open(false);
             ui.set_settings_view(62); ui.set_gen_index(1); ui.set_gen_scroll(0);
             ui.set_gen_scopes(scopes(&[s(ui, 313)]));
             ui.set_gen_section(s(ui, 1024).into());
@@ -1481,9 +1629,11 @@ fn main() {
         ui.set_app_page_entries(entries(&[]));
         ui.set_app_page_description(s(ui, 1367).into());
         ui.set_app_page_actions(actions(&[(0, s(ui, 1362), true, false, false), (5, s(ui, 487), false, false, false),
-            (4, s(ui, 852), false, true, false), (10, s(ui, 1364), false, false, false)]));
-        ui.set_app_page_captions(captions(&[&s(ui, 1363), "", &s(ui, 1368), &s(ui, 1365)]));
+            (4, s(ui, 852), false, true, false), (27, s(ui, 1430), false, false, false), (10, s(ui, 1364), false, false, false)]));
+        ui.set_app_page_captions(captions(&[&s(ui, 1363), "", &s(ui, 1368), &s(ui, 1431), &s(ui, 1365)]));
     })));
+    /* Ports on SD2 (GitHub #21) focused. */
+    scenes.push(("portmaster_location", Box::new(|ui| { ui.set_gen_index(3); })));
     let ap = app_page.clone();
     scenes.push(("portmaster_absent", Box::new(move |ui| {
         ap(ui, "PORTMASTER", "PortMaster", "");
@@ -1493,6 +1643,29 @@ fn main() {
         ui.set_app_page_description(s(ui, 1367).into());
         ui.set_app_page_actions(actions(&[(4, s(ui, 1359), true, false, false)]));
         ui.set_app_page_captions(captions(&[&s(ui, 494)]));
+    })));
+    /* Ports on SD2 being moved (GitHub #21). */
+    scenes.push(("portmaster_moving", Box::new(|ui| {
+        ui.set_app_page_chips(chips(&[]));
+        ui.set_app_page_progress(0.37);
+        ui.set_app_page_progress_label(format!("{} • 37%", s(ui, 1432)).into());
+        ui.set_app_page_actions(actions(&[(7, s(ui, 482), true, false, false)]));
+        ui.set_app_page_captions(captions(&[""]));
+        ui.set_gen_index(0);
+    })));
+    scenes.push(("portmaster_moved", Box::new(|ui| {
+        ui.set_app_page_progress(-1.0); ui.set_app_page_progress_label("".into());
+        ui.set_app_page_actions(actions(&[(0, s(ui, 1362), true, false, false), (5, s(ui, 487), false, false, false),
+            (4, s(ui, 852), false, true, false), (27, s(ui, 1430), false, true, false), (10, s(ui, 1364), false, false, false)]));
+        ui.set_app_page_captions(captions(&[&s(ui, 1363), "", &s(ui, 1368), &s(ui, 1433).replace("{0}", "2"), &s(ui, 1365)]));
+        ui.set_gen_index(3);
+    })));
+    /* Ports on SD2 with the card out: Insert SD2. */
+    scenes.push(("portmaster_sd2_out", Box::new(|ui| {
+        ui.set_app_page_chips(chips(&[(13, &s(ui, 81), true)]));
+        ui.set_app_page_actions(actions(&[(4, s(ui, 1359), true, false, false), (27, s(ui, 1430), false, true, false)]));
+        ui.set_app_page_captions(captions(&["", &s(ui, 1431)]));
+        ui.set_gen_index(1);
     })));
     scenes.push(("portmaster_leave", Box::new(|ui| {
         ui.set_portmaster_active(false);

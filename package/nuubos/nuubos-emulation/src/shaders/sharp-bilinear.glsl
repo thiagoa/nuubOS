@@ -20,14 +20,22 @@
 
 COMPAT_ATTRIBUTE vec4 VertexCoord;
 COMPAT_ATTRIBUTE vec4 TexCoord;
-COMPAT_VARYING vec2 vTexCoord;
+COMPAT_VARYING vec2 vTexel;
+/* Per frame: integer scale, its hard-edged half width. */
+COMPAT_VARYING vec4 vScale;
 
 uniform mat4 MVPMatrix;
+uniform vec2 OutputSize;
+uniform vec2 TextureSize;
+uniform vec2 InputSize;
 
 void main()
 {
     gl_Position = MVPMatrix * VertexCoord;
-    vTexCoord = TexCoord.xy;
+    vTexel = TexCoord.xy * TextureSize;
+    /* Integer part of the scale: those pixels stay hard edged. */
+    vec2 scale = max(floor(OutputSize / InputSize), vec2(1.0));
+    vScale = vec4(scale, 0.5 - 0.5 / scale);
 }
 
 #elif defined(FRAGMENT)
@@ -51,25 +59,20 @@ out vec4 FragColor;
 #define COMPAT_TEXTURE texture2D
 #endif
 
-uniform vec2 OutputSize;
 uniform vec2 TextureSize;
-uniform vec2 InputSize;
 uniform sampler2D Texture;
-COMPAT_VARYING vec2 vTexCoord;
+COMPAT_VARYING vec2 vTexel;
+COMPAT_VARYING vec4 vScale;
 
 void main()
 {
-    vec2 texel = vTexCoord * TextureSize;
-    /* Integer part of the scale: those pixels stay hard edged. */
-    vec2 scale = max(floor(OutputSize / InputSize), vec2(1.0));
-    vec2 edge = 0.5 - 0.5 / scale;
-    vec2 offset = fract(texel) - 0.5;
+    vec2 offset = fract(vTexel) - 0.5;
     /* Inside a pixel sample its centre; near its border interpolate
      * towards the neighbour over one output pixel. */
-    vec2 blend = (offset - clamp(offset, -edge, edge)) * scale + 0.5;
+    vec2 blend = (offset - clamp(offset, -vScale.zw, vScale.zw)) * vScale.xy + 0.5;
 
     FragColor = vec4(COMPAT_TEXTURE(Texture,
-                     (floor(texel) + blend) / TextureSize).rgb, 1.0);
+                     (floor(vTexel) + blend) * (1.0 / TextureSize)).rgb, 1.0);
 }
 
 #endif

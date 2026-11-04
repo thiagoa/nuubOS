@@ -1,0 +1,81 @@
+From: nuubOS <nuubos@localhost>
+Date: Thu, 29 Oct 2026 14:00:00 +0100
+Subject: [PATCH] Picture in picture corner option (nuubOS)
+
+The small screen of the Picture in Picture layouts always sat in the
+bottom right corner, where it can hide text (GitHub #5: Pokemon dialogue
+boxes). melonds_nuubos_pip_corner puts it in any of the four corners
+(default bottom right, as before); only its position changes, the
+composition, the blend and the touch mapping already follow small_x and
+small_y.
+---
+--- a/src/libretro/libretro.cpp
++++ b/src/libretro/libretro.cpp
+@@ -698,6 +698,15 @@
+          input_state.stylus = Stylus::Dpad;
+    }
+ 
++   var.key = "melonds_nuubos_pip_corner";
++   screen_layout_data.pip_left = false;
++   screen_layout_data.pip_top = false;
++   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
++   {
++      screen_layout_data.pip_left = strstr(var.value, "left") != NULL;
++      screen_layout_data.pip_top = !strncmp(var.value, "top", 3);
++   }
++
+    // a toggled swap stays across option changes (nuubOS)
+    update_screenlayout(layout, &screen_layout_data, enable_opengl,
+                        toggle_swap_screen ? swap_screen_toggled : swapped_screens);
+--- a/src/libretro/libretro_core_options.h
++++ b/src/libretro/libretro_core_options.h
+@@ -393,6 +393,22 @@
+       "off"
+    },
+    {
++      "melonds_nuubos_pip_corner",
++      "Picture in Picture Corner",
++      NULL,
++      "Where the small screen sits in the Picture in Picture layouts.",
++      NULL,
++      "screen",
++      {
++         { "bottom-right", "Bottom Right" },
++         { "bottom-left",  "Bottom Left" },
++         { "top-right",    "Top Right" },
++         { "top-left",     "Top Left" },
++         { NULL, NULL },
++      },
++      "bottom-right"
++   },
++   {
+       "melonds_screen_gap",
+       "Screen Gap",
+       NULL,
+--- a/src/libretro/screenlayout.cpp
++++ b/src/libretro/screenlayout.cpp
+@@ -240,9 +240,9 @@
+             data->buffer_height = data->screen_height * (pip ? 2 : 3);
+             data->buffer_stride = data->buffer_width * pixel_size;
+ 
+-            data->small_x = pip ? data->buffer_width - data->small_w - margin
++            data->small_x = pip ? (data->pip_left ? margin : data->buffer_width - data->small_w - margin)
+                                 : (data->buffer_width - data->screen_width) / 2;
+-            data->small_y = pip ? data->buffer_height - data->small_h - margin
++            data->small_y = pip ? (data->pip_top ? margin : data->buffer_height - data->small_h - margin)
+                                 : data->screen_height * 2;
+ 
+             // the touch screen is the small one when the top screen is big
+--- a/src/libretro/screenlayout.h
++++ b/src/libretro/screenlayout.h
+@@ -78,6 +78,10 @@
+     unsigned small_h;
+     unsigned touch_w;
+     unsigned touch_h;
++    // Picture in Picture: corner of the small screen (nuubOS,
++    // melonds_nuubos_pip_corner): left and top edges, default bottom right
++    bool pip_left;
++    bool pip_top;
+ 
+     unsigned screen_gap_unscaled;
+     unsigned screen_gap;
