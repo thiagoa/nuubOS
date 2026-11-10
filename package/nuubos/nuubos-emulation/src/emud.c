@@ -376,6 +376,12 @@ struct session {
 	 * (user request 2026-10-27). hardcore itself can change mid-session
 	 * through that row; this cannot (it is fixed at launch). */
 	bool achievements_enabled;
+	/* Whether this session's cheevos traffic is going through the local
+	 * offline-achievements proxy (raproxy_ensure() at launch). The proxy
+	 * refuses any hardcore award outright, so the Hardcore Mode row
+	 * cannot turn hardcore on while this is set; fixed at launch like
+	 * achievements_enabled, for the same reason. */
+	bool proxy;
 	long long started_ms;
 	long long quit_deadline_ms;
 	bool term_sent;
@@ -431,6 +437,14 @@ struct session {
 	int net_peers;
 	char net_peer[40];
 	bool relaunch_host;
+	/* Quick Menu Hardcore Mode row, turned on while this session's
+	 * achievements are routed through the local offline-achievements
+	 * proxy: cheevos binds its server host once per RetroArch process
+	 * (rc_client_set_host(), called only the first time the client is
+	 * created) and never re-reads it, so there is no live way off the
+	 * proxy. Quit-and-relaunch like Host Game, forcing hardcore for
+	 * that one relaunch (see force_hardcore_once). */
+	bool relaunch_hardcore;
 	/* melonDS-nuubOS: the user's core options file, the screen layout the
 	 * hotkey cycles through (nds_layouts), the stylus mode, and the
 	 * user's accuracy to put back at exit when the game overrides it. */
@@ -2810,6 +2824,10 @@ static void load_achievements(const char *user, struct achievements *a)
 
 static pid_t raproxy_pid = -1;
 static char raproxy_user[64];
+/* One-shot: the next launch() forces hardcore on regardless of the user's
+ * stored setting, for the relaunch that session.relaunch_hardcore asked
+ * for. Cleared by launch() itself as soon as it is read. */
+static bool force_hardcore_once = false;
 
 static void raproxy_kill(pid_t pid)
 {
@@ -4518,11 +4536,16 @@ static const char *launch(const char *game, const char *mode, const char *net)
 		remap_list(&overrides, session.remap, sizeof(session.remap));
 	}
 	load_achievements(session.user, &achievements);
+	if (force_hardcore_once) {
+		achievements.hardcore = true;
+		force_hardcore_once = false;
+	}
 	session.hardcore = achievements.enabled && achievements.hardcore;
 	session.achievements_enabled = achievements.enabled;
 	if (session.hardcore && !strncmp(mode, "slot:", 5))
 		return "hardcore";
 	achievements.proxy = raproxy_ensure(session.user, &achievements);
+	session.proxy = achievements.proxy;
 	/* Joining: the host's emulator, whatever the game's choice. */
 	if (net_core[0]) {
 		char cores[512];
@@ -5126,6 +5149,10 @@ static void child_exited(int status)
 	/* Host Game: the same game again, from the progress its quit just
 	 * saved, as a netplay host. */
 	bool relaunch = session.relaunch_host && !failed && power_client < 0;
+	/* Quick Menu Hardcore Mode row while the offline-achievements proxy
+	 * was active: the same game again, hardcore this time (see
+	 * force_hardcore_once). */
+	bool relaunch_hardcore = session.relaunch_hardcore && !failed && power_client < 0;
 	char game[sizeof(session.game)];
 
 	log_msg("emud: retroarch exited pid=%d status=%d after %lld ms",
@@ -5143,12 +5170,16 @@ static void child_exited(int status)
 	restore_session_core_options();
 	copy_text(game, sizeof(game), session.game);
 	reset_session();
-	if (relaunch) {
-		const char *error = launch(game, "resume", "host");
+	if (relaunch || relaunch_hardcore) {
+		const char *error;
 
+		force_hardcore_once = relaunch_hardcore;
+		error = launch(game, "resume", relaunch ? "host" : NULL);
 		if (!error)
 			return;
-		log_msg("emud: host relaunch of %s refused: %s", game, error);
+		log_msg("emud: %s relaunch of %s refused: %s",
+			relaunch_hardcore ? "hardcore" : "host", game, error);
+		force_hardcore_once = false;
 		reset_session();
 		notify_failed("start");
 	}
@@ -6336,6 +6367,20 @@ static void handle_command(struct client *c, char *line)
 			return;
 		if (!session.achievements_enabled) {
 			reply(c, "ERR unavailable\n");
+			return;
+		}
+		/* The session started with achievements routed through the local
+		 * offline-achievements proxy (raproxy_ensure() at launch), which
+		 * refuses any hardcore award outright. cheevos binds its server
+		 * host once per RetroArch process and never re-reads it
+		 * (rc_client_set_host(), cheevos.c), so there is no live way off
+		 * the proxy: quit and relaunch the same game hardcore instead,
+		 * the same way Host Game relaunches as a netplay host. The quit
+		 * saves progress first like any other quit. */
+		if (on && session.proxy) {
+			session.relaunch_hardcore = true;
+			request_quit();
+			reply(c, "OK\n");
 			return;
 		}
 		if (on && session.cheats_on) {
