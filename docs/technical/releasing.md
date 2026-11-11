@@ -40,6 +40,7 @@ tools/ota/make-update.sh ~/nuubos-release nightly ~/nuubos-release-notes.txt
 tools/ota/add-image.sh ~/nuubos-release
 ```
 
+- Other download hosts: `NUUBOS_UPDATE_SOURCES="https://host1/path https://host2/path"` in front of `make-update.sh` writes them into the signed manifest; consoles that install that release try them before GitHub (same folder layout as the GitHub releases). Without it the consoles use GitHub only.
 - `make-update.sh` asks for the passphrase, checks it against `update-key.pub`,
   compresses `rootfs.ext4` into the payload and signs the manifest. The notes file
   is plain text, at most 4000 bytes, one item per line: it appears on the console
@@ -54,15 +55,27 @@ tools/ota/add-image.sh ~/nuubos-release
 
 ## 4. Publish
 
+SourceForge is the download and update backend of every channel (since
+1.0.0-rc.5). GitHub Releases carry the stable releases only, and serve the consoles
+as a fallback when SourceForge does not answer.
+
 ```sh
 git push
+NUUBOS_SF_USER=<sourceforge user> tools/ota/publish-sf.sh ~/nuubos-release
+# stable releases only, afterwards:
 tools/ota/publish.sh ~/nuubos-release
 ```
 
-`publish.sh` creates the versioned release `v<version>` with every file
-(a pre-release unless the channel is stable), then replaces the manifest and
-signature in `channel-<channel>`. Devices on that channel see the update at their
-next check (within a day, or at once with Check).
+`publish-sf.sh` uploads `v<version>/` (payload, image, legal-info, checksums and the
+notes as `README.txt`) with rsync over SSH, then the manifest and signature to
+`channel-<channel>/`. `publish.sh` does the same on GitHub: the versioned release,
+then the manifest in the `channel-<channel>` release; it refuses nightly and RC
+releases (`NUUBOS_GITHUB_PRERELEASE=1` overrides it, used once for 1.0.0-rc.5, the
+last release the RC4 consoles find on GitHub). Devices on that channel see the
+update at their next check (within a day, or at once with Check).
+
+Space out the GitHub steps (account suspended on 2026-10-30 after a burst of
+automated actions on release day).
 
 ## 5. After publishing
 

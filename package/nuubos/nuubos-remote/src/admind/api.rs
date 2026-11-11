@@ -59,7 +59,7 @@ fn settings_key(s: &str) -> Result<String, String> {
     if s.strip_prefix("remap_").is_some_and(|c| CONTROLS.contains(&c)) {
         return Ok(s.to_owned());
     }
-    one_of(s, &["core", "aspect", "filter", "accuracy", "pak", "resolution", "frameskip", "remap"])
+    one_of(s, &["core", "aspect", "scaling", "filter", "accuracy", "pak", "resolution", "frameskip", "remap"])
 }
 
 fn flag(s: &str) -> Result<&'static str, String> {
@@ -336,6 +336,7 @@ pub fn action(b: &Value) -> R {
         "system.hypersleep" => { sock_ok("systemd", &format!("SET HYPERSLEEP {}", one_of(&a("v"), &["0", "1"])?))?; ok() }
         "system.faststartup" => { sock_ok("systemd", &format!("SET FAST_STARTUP {}", one_of(&a("v"), &["0", "1"])?))?; ok() }
         "system.powerkeysleep" => { sock_ok("systemd", &format!("SET POWER_KEY_SLEEP {}", one_of(&a("v"), &["0", "1"])?))?; ok() }
+        "system.lidwake" => { sock_ok("systemd", &format!("SET LID_WAKE {}", one_of(&a("v"), &["0", "1"])?))?; ok() }
         /* The games card (SD2) and the console backup. */
         "storage.eject" => { sock_ok("systemd", "STORAGE SD2 EJECT")?; ok() }
         "storage.use" => { sock_ok("systemd", "STORAGE SD2 USE")?; ok() }
@@ -355,7 +356,7 @@ pub fn action(b: &Value) -> R {
         "display.temperature" => { tool_ok("nuubos-displayctl", &["temperature", &int(&a("v"), 3500, 7500)?.to_string()])?; done("display") }
 
         /* Audio (nuubos-audiod). */
-        "audio.output" => { call0("Audio", "SetOutput", &(one_of(&a("v"), &["auto", "analog", "bluetooth", "hdmi"])?.as_str(),))?; ok() }
+        "audio.output" => { call0("Audio", "SetOutput", &(one_of(&a("v"), &["auto", "analog", "bluetooth", "usb", "hdmi"])?.as_str(),))?; ok() }
         "audio.volume" => { call0("Audio", "SetVolume", &(int(&a("v"), 0, 100)? as i32,))?; ok() }
         "audio.system" => { sock_ok("audiod", &format!("SYSTEM VOLUME SET {}", int(&a("v"), 0, 100)?))?; done("audio") }
         "audio.apps" => { sock_ok("audiod", &format!("APPLICATIONS VOLUME SET {}", int(&a("v"), 0, 100)?))?; done("audio") }

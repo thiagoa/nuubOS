@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 */
+/* SPDX-License-Identifier: GPL-3.0-or-later */
 /*
  * nuubos-updatectl — OTA updates, network and verification side (EPIC-048).
  *
@@ -22,6 +22,18 @@
  * "channel-<name>" whose assets are the current manifest and signature
  * (replaced at every publication); the manifest names the payload by
  * "<release tag>/<file>", a versioned release of its own.
+ *
+ * Sources (user decision 2026-11-10): the same layout is served by
+ * SourceForge (UPDATE_SOURCES, the backend for every channel) and, for
+ * stable releases, by GitHub (UPDATE_URL, the emergency fallback only). A
+ * verified manifest may carry "sources=" (up to MAX_SOURCES https base
+ * URLs, space separated), kept in SOURCES_FILE, which then replaces
+ * UPDATE_SOURCES. Every check asks all those sources and keeps the newest
+ * verified manifest (a host that syncs late cannot hide an update); GitHub
+ * is asked only when none of them answers at all, so consoles do not poll
+ * it. The payload is fetched from them in order, GitHub last. Only a
+ * signed manifest changes the list, and a host can never redirect the
+ * consoles by itself.
  *
  * Trust comes from the signature, never from the transport: the manifest
  * (a small key=value file) is signed with the nuubOS release key (Ed25519)
@@ -84,6 +96,17 @@
 #endif
 #ifndef UPDATE_LOCK
 #define UPDATE_LOCK "/run/nuubos-update.lock"
+#endif
+#ifndef SOURCES_FILE
+#define SOURCES_FILE "/state/update/sources"
+#endif
+#define MAX_SOURCES 4
+#ifndef UPDATE_SOURCES
+#define UPDATE_SOURCES "https://downloads.sourceforge.net/project/nuubos"
+#endif
+/* Host tests serve the sources over plain http. */
+#ifndef SOURCE_SCHEME
+#define SOURCE_SCHEME "https://"
 #endif
 #ifndef UPDATE_DEFAULT_CHANNEL
 #define UPDATE_DEFAULT_CHANNEL "stable"
@@ -444,6 +467,54 @@ static bool manifest_offers_update(void)
 	       atoll(serial) > current_serial();
 }
 
+/* The download sources in order: SOURCES_FILE (else UPDATE_SOURCES), then
+ * UPDATE_URL, the fallback. Returns how many come before the fallback. */
+static int sources(char list[MAX_SOURCES + 1][512])
+{
+	char line[512], compiled[MAX_SOURCES * 512], *save = NULL, *url;
+	int n = 0;
+	FILE *fp = fopen(SOURCES_FILE, "r");
+
+	while (fp && n < MAX_SOURCES && fgets(line, sizeof(line), fp)) {
+		line[strcspn(line, "\r\n")] = '\0';
+		if (!strncmp(line, SOURCE_SCHEME, strlen(SOURCE_SCHEME)) && strcmp(line, UPDATE_URL))
+			snprintf(list[n++], sizeof(list[0]), "%s", line);
+	}
+	if (fp)
+		fclose(fp);
+	if (!n) {
+		snprintf(compiled, sizeof(compiled), "%s", UPDATE_SOURCES);
+		for (url = strtok_r(compiled, " ", &save); url && n < MAX_SOURCES; url = strtok_r(NULL, " ", &save))
+			snprintf(list[n++], sizeof(list[0]), "%s", url);
+	}
+	snprintf(list[n], sizeof(list[0]), "%s", UPDATE_URL);
+	return n;
+}
+
+/* sources= of the verified manifest becomes the list (none: removed). */
+static void save_sources(const char *manifest)
+{
+	char value[MAX_SOURCES * 512], *save = NULL, *url;
+	FILE *fp;
+	int n = 0;
+
+	if (!file_value(manifest, "sources", value, sizeof(value)) || !value[0]) {
+		unlink(SOURCES_FILE);
+		return;
+	}
+	if (!(fp = fopen(SOURCES_FILE ".tmp", "w")))
+		return;
+	for (url = strtok_r(value, " ", &save); url && n < MAX_SOURCES; url = strtok_r(NULL, " ", &save))
+		if (!strncmp(url, SOURCE_SCHEME, strlen(SOURCE_SCHEME)) && strlen(url) < 500 && !strpbrk(url, "\"'\\")) {
+			fprintf(fp, "%s\n", url);
+			n++;
+		}
+	if (fflush(fp) == 0 && fsync(fileno(fp)) == 0 && fclose(fp) == 0)
+		rename(SOURCES_FILE ".tmp", SOURCES_FILE);
+	else
+		unlink(SOURCES_FILE ".tmp");
+}
+
 /* No answer at all (DNS, connection, timeout) = the network; an HTTP error
  * (GitHub rate limit, 5xx) = the update service. */
 static const char *http_failure(long status)
@@ -456,23 +527,24 @@ static const char *http_failure(long status)
  * a verified manifest of a format this build understands, published for
  * that channel; 1 = nothing published there (404); else the failure.
  */
-static const char *fetch_channel(const char *channel, long long *serial)
+/* One host's manifest of the channel into manifest.cand: NULL = verified,
+ * "" = nothing published there (404 or another channel/format), else the
+ * failure. */
+static const char *fetch_from(const char *base, const char *channel, long long *serial)
 {
 	char url[1024], format[16], name[32], text[32];
 	long status;
 
-	snprintf(url, sizeof(url), "%s/channel-%s/nuubos-update.manifest", UPDATE_URL, channel);
+	snprintf(url, sizeof(url), "%s/channel-%s/nuubos-update.manifest", base, channel);
 	status = fetch(url, UPDATE_DIR "/manifest.cand", false, 30);
-	if (status == 404) {
-		unlink(UPDATE_DIR "/manifest.cand");
+	if (status == 404)
 		return "";
-	}
 	if (status != 200)
 		return http_failure(status);
-	snprintf(url, sizeof(url), "%s/channel-%s/nuubos-update.manifest.sig", UPDATE_URL, channel);
+	snprintf(url, sizeof(url), "%s/channel-%s/nuubos-update.manifest.sig", base, channel);
 	status = fetch(url, UPDATE_DIR "/manifest.cand.sig", false, 30);
 	if (status != 200)
-		return http_failure(status);
+		return status == 404 ? "" : http_failure(status);
 	if (!manifest_file_verified(UPDATE_DIR "/manifest.cand", UPDATE_DIR "/manifest.cand.sig"))
 		return "signature";
 	file_value(UPDATE_DIR "/manifest.cand", "format", format, sizeof(format));
@@ -482,6 +554,50 @@ static const char *fetch_channel(const char *channel, long long *serial)
 	if (atoi(format) != MANIFEST_FORMAT || strcmp(name, channel))
 		return "";
 	*serial = atoll(text);
+	return NULL;
+}
+
+/*
+ * The newest verified manifest of one channel into manifest.cand: NULL =
+ * found, "" = nothing published there, else the failure. GitHub (the
+ * fallback) only when no other source answered at all.
+ */
+static const char *fetch_channel(const char *channel, long long *serial)
+{
+	char list[MAX_SOURCES + 1][512];
+	const char *failure = NULL;
+	bool answered = false;
+	int n = sources(list);
+
+	*serial = -1;
+	for (int i = 0; i <= n; i++) {
+		long long s = -1;
+		const char *rc;
+
+		if (i == n && (answered || *serial >= 0))
+			break;
+		rc = fetch_from(list[i], channel, &s);
+		/* A 404 or a bad signature is an answer: only silence or HTTP
+		 * errors from every source bring in the fallback. */
+		if (!rc || !*rc || !strcmp(rc, "signature"))
+			answered = true;
+		if (rc) {
+			if (*rc && (!failure || !strcmp(rc, "signature")))
+				failure = rc;
+			continue;
+		}
+		if (s > *serial) {
+			*serial = s;
+			rename(UPDATE_DIR "/manifest.cand", UPDATE_DIR "/manifest.best");
+			rename(UPDATE_DIR "/manifest.cand.sig", UPDATE_DIR "/manifest.best.sig");
+		}
+	}
+	unlink(UPDATE_DIR "/manifest.cand");
+	unlink(UPDATE_DIR "/manifest.cand.sig");
+	if (*serial < 0)
+		return failure ? failure : "";
+	rename(UPDATE_DIR "/manifest.best", UPDATE_DIR "/manifest.cand");
+	rename(UPDATE_DIR "/manifest.best.sig", UPDATE_DIR "/manifest.cand.sig");
 	return NULL;
 }
 
@@ -532,6 +648,7 @@ static int cmd_check(void)
 	}
 	rename(UPDATE_DIR "/manifest.new", UPDATE_DIR "/manifest");
 	rename(UPDATE_DIR "/manifest.sig.new", UPDATE_DIR "/manifest.sig");
+	save_sources(UPDATE_DIR "/manifest");
 	file_value(UPDATE_DIR "/manifest", "version", version, sizeof(version));
 	if (manifest_offers_update())
 		printf("OK available %s\n", version);
@@ -620,10 +737,22 @@ static int cmd_download(void)
 	unlink(UPDATE_DIR "/payload");
 	if (!room_for(size))
 		return fail("space");
-	snprintf(url, sizeof(url), "%s/%s", UPDATE_URL, payload);
 	trim_part();
 	unlink(PART_CLEAN);
-	status = fetch(url, UPDATE_DIR "/payload.part", true, 0);
+	/* Source after source; the part resumes on the next one (the checksum
+	 * below covers the whole file whichever host gave each piece). */
+	{
+		char list[MAX_SOURCES + 1][512];
+		int n = sources(list);
+
+		status = -1;
+		for (int i = 0; i <= n && !cancelled; i++) {
+			snprintf(url, sizeof(url), "%s/%s", list[i], payload);
+			status = fetch(url, UPDATE_DIR "/payload.part", true, 0);
+			if (status == 200 || status == 206 || status == 416 || status == -2)
+				break;
+		}
+	}
 	if (status != -2)
 		mark_part_clean();
 	if (cancelled)
